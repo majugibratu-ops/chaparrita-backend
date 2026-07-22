@@ -165,9 +165,20 @@ function extractReservaMarker(text) {
   return { cleanText, reservaConfirmada };
 }
 
+// Argentina: los mensajes ENTRANTES llegan con "549" + número (ej 5493704332207),
+// pero para ENVIAR hay que sacarle el 9 (549XXXXXXXXXX -> 54XXXXXXXXXX), es un
+// comportamiento conocido y documentado de la WhatsApp Cloud API para números argentinos.
+function normalizarParaEnvioAR(numero) {
+  if (numero.startsWith("549")) {
+    return "54" + numero.slice(3);
+  }
+  return numero;
+}
+
 // ==================== Envío de mensajes por WhatsApp ====================
 async function sendWhatsappText(to, body) {
-  console.log(`Enviando mensaje a ${to} vía WhatsApp (Phone Number ID: ${WHATSAPP_PHONE_NUMBER_ID})...`);
+  const destino = normalizarParaEnvioAR(to);
+  console.log(`Enviando mensaje a ${destino} (original: ${to}) vía WhatsApp (Phone Number ID: ${WHATSAPP_PHONE_NUMBER_ID})...`);
   const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
     method: "POST",
     headers: {
@@ -176,7 +187,7 @@ async function sendWhatsappText(to, body) {
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to,
+      to: destino,
       type: "text",
       text: { body },
     }),
