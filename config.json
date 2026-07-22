@@ -20,7 +20,15 @@
       { "nombre": "Hamburguesas", "emoji": "🍔", "precioPersona": 20500, "descripcion": "" },
       { "nombre": "Lomitos", "emoji": "🌯", "precioPersona": 25000, "descripcion": "" }
     ],
-    "basePrecios": { "pizza": 18000, "bebida": 10000, "shot": 200, "torta": 18000 },
+    "basePrecios": {
+      "pizza": 18000,
+      "tacos": 12500,
+      "hamburguesas": 15000,
+      "lomitos": 17000,
+      "bebida": 10000,
+      "shot": 200,
+      "torta": 18000
+    },
     "descuentoPresupuestoAMedida": 0.10,
     "señaPorcentaje": 0.30,
     "cuenta": {
