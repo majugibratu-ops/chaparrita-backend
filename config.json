@@ -1,0 +1,38 @@
+{
+  "horarios": "Confirmar horarios reales (placeholder: Martes a Domingo de 19:00 a 01:00hs, lunes cerrado)",
+  "tiendaOnlineUrl": "https://CAMBIAR-POR-LINK-REAL",
+  "agotados": [],
+  "amenities": {
+    "adentro": "Aire acondicionado y proyector",
+    "patio": "2 televisores de 44 pulgadas y ventiladores",
+    "vereda": "Se ven los televisores del patio interno desde afuera"
+  },
+  "cumpleaños": {
+    "minPersonas": 10,
+    "paquetes": [
+      { "nombre": "Pizza y Festejo", "emoji": "🍕", "precioPersona": 15000, "descripcion": "" },
+      {
+        "nombre": "Taco Libre",
+        "emoji": "🌮",
+        "precioPersona": 18500,
+        "descripcion": "Nuestra Promo Taco Libre es un viaje directo a México diseñado para que prueben de todo y siempre coman excelente.\n\nPara arrancar: recibimos a la mesa con una entrada de Nachos y dos salsas a elección, de nuestra gran variedad: Mayonesa, Lactonesa de Ajo, Salsa de choclo, Mayonesa Verde (de Palta), Pico de gallo (con o sin picante), Salsa picante, Ketchup, Guacamole, ChapaGolf, MayoCesar o Teriyaki.\n\nEl Festín (Taco Libre) incluye: Tacos (Birria, Cerdo, Pollo), Gringas (Birria, Cerdo, Pollo), Papas Poblanas y Mini Quesadillas (Queso y cebolla / Queso, tomate y orégano).\n\n¿Cómo es la dinámica? Servimos de a una unidad por persona en tandas, para que cada bocado llegue bien calentito. Las tandas salen en un orden predeterminado (sistema de carrusel) para que todos prueben la variedad completa. Terminada la tanda, se puede repetir lo que quieran sin límite; entre tanda y tanda hay una demora de unos 12 a 15 minutos para mantener la frescura y el punto de cocción.\n\nEs la opción ideal para grupos que disfrutan comer rico, variado y siempre recién hecho."
+      },
+      { "nombre": "Hamburguesas", "emoji": "🍔", "precioPersona": 20500, "descripcion": "" },
+      { "nombre": "Lomitos", "emoji": "🌯", "precioPersona": 25000, "descripcion": "" }
+    ],
+    "basePrecios": { "pizza": 18000, "bebida": 10000, "shot": 200, "torta": 18000 },
+    "descuentoPresupuestoAMedida": 0.10,
+    "señaPorcentaje": 0.30,
+    "cuenta": {
+      "titular": "Marcelo Julian Ginard Bracho",
+      "cuit": "23-31178426-9",
+      "cvu": "0000003100026856890521",
+      "alias": "chapa.fsa"
+    }
+  },
+  "staff": {
+    "cajera": { "nombre": "Valentina", "telefono": "+54 9 370 CAMBIAR" },
+    "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 CAMBIAR" }
+  },
+  "grupoReservasWhatsappId": "CAMBIAR-ID-DEL-GRUPO-RESERVAS-CHAPARRITA"
+}
