@@ -53,9 +53,19 @@
     "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 CAMBIAR" },
     "cocina": { "nombre": "Jefe de cocina", "telefono": "+54 9 370 CAMBIAR" }
   },
+  "ofertaCumpleañosProximo": {
+    "activo": true,
+    "diasAntes": 7
+  },
   "cumpleañosCliente": {
     "activo": true,
-    "descuentoPorcentaje": 15
+    "descuentoPorcentaje": 10,
+    "shotsTequilaSiFestejaEnLocal": true
+  },
+  "avisoCumpleañosDiario": {
+    "activo": true,
+    "telefono": "",
+    "hora": "09:00"
   },
   "tacosLibresPublico": {
     "dias": ["Miércoles", "Jueves", "Domingo"],

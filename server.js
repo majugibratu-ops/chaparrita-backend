@@ -89,6 +89,34 @@ function esCumpleañosHoy(cumpleanosDDMM, fechaHoyISO) {
   return normalizado === hoyDDMM;
 }
 
+// Devuelve la fecha ISO (YYYY-MM-DD) del próximo cumpleaños de una persona
+function proximoCumpleISO(cumpleanosDDMM, fechaHoyISO) {
+  const [dia, mes] = (cumpleanosDDMM || "").split("-").map(Number);
+  if (!dia || !mes || !fechaHoyISO) return null;
+  const [anioHoy] = fechaHoyISO.split("-").map(Number);
+  const hoy = new Date(`${fechaHoyISO}T00:00:00-03:00`);
+  let anio = anioHoy;
+  let fechaStr = `${anio}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+  if (new Date(`${fechaStr}T00:00:00-03:00`) < hoy) {
+    anio += 1;
+    fechaStr = `${anio}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+  }
+  return fechaStr;
+}
+
+// Calcula cuántos días faltan para el próximo cumpleaños de una persona (0 = hoy)
+function diasHastaProximoCumple(cumpleanosDDMM, fechaHoyISO) {
+  const [dia, mes] = (cumpleanosDDMM || "").split("-").map(Number);
+  if (!dia || !mes || !fechaHoyISO) return null;
+  const [anioHoy] = fechaHoyISO.split("-").map(Number);
+  const hoy = new Date(`${fechaHoyISO}T00:00:00-03:00`);
+  let proximo = new Date(`${anioHoy}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}T00:00:00-03:00`);
+  if (proximo < hoy) {
+    proximo = new Date(`${anioHoy + 1}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}T00:00:00-03:00`);
+  }
+  return Math.round((proximo - hoy) / (1000 * 60 * 60 * 24));
+}
+
 // Saca la marca interna [[CLIENTE_DATOS: {...}]] y devuelve el texto limpio + los datos aprendidos
 function extractClienteDatosMarker(text) {
   const regex = /\[\[CLIENTE_DATOS:\s*(\{[\s\S]*?\})\]\]/;
@@ -253,6 +281,37 @@ const ADMIN_CONFIG_PAGE = [
   '  var grupoInput = textInput(cfg.grupoReservasWhatsappId);',
   '  area.appendChild(field("ID de WhatsApp del grupo Reservas Chaparrita", grupoInput));',
   '',
+  '  area.appendChild(el("h2", {text:"Oferta proactiva antes del cumpleanos"}));',
+  '  area.appendChild(el("p", {text:"Le manda un WhatsApp al cliente antes de su cumple ofreciendole reservar (con los beneficios de abajo) o las promos grupales.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
+  '  var ofertaCumple = cfg["ofertaCumplea\u00f1osProximo"] || {activo:true, diasAntes:7};',
+  '  var ofertaCumpleActivo = el("input", {type:"checkbox"}); ofertaCumpleActivo.checked = ofertaCumple.activo !== false;',
+  '  var lblOfertaActivo = el("label", {text:" Activo"}); lblOfertaActivo.style.display="inline"; lblOfertaActivo.style.fontWeight="normal";',
+  '  area.appendChild(el("div", {}, [ofertaCumpleActivo, lblOfertaActivo]));',
+  '  var ofertaCumpleDias = numInput(ofertaCumple.diasAntes);',
+  '  area.appendChild(field("Dias de anticipacion", ofertaCumpleDias));',
+  '',
+  '  area.appendChild(el("h2", {text:"Cumpleanos de clientes (mimo personal)"}));',
+  '  area.appendChild(el("p", {text:"Cuando un cliente conocido escribe el dia de su cumple.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
+  '  var cumpleCli = cfg["cumplea\u00f1osCliente"] || {activo:true, descuentoPorcentaje:10, shotsTequilaSiFestejaEnLocal:true};',
+  '  var cumpleCliActivo = el("input", {type:"checkbox"}); cumpleCliActivo.checked = cumpleCli.activo !== false;',
+  '  var lblCumpleCliActivo = el("label", {text:" Activo"}); lblCumpleCliActivo.style.display="inline"; lblCumpleCliActivo.style.fontWeight="normal";',
+  '  area.appendChild(el("div", {}, [cumpleCliActivo, lblCumpleCliActivo]));',
+  '  var cumpleCliDesc = numInput(cumpleCli.descuentoPorcentaje);',
+  '  var cumpleCliShots = el("input", {type:"checkbox"}); cumpleCliShots.checked = cumpleCli.shotsTequilaSiFestejaEnLocal !== false;',
+  '  var lblCumpleCliShots = el("label", {text:" Incluir ronda de shots de tequila si vienen a festejar al local"}); lblCumpleCliShots.style.display="inline"; lblCumpleCliShots.style.fontWeight="normal";',
+  '  area.appendChild(field("Descuento (%)", cumpleCliDesc));',
+  '  area.appendChild(el("div", {style:"margin-top:6px;"}, [cumpleCliShots, lblCumpleCliShots]));',
+  '',
+  '  area.appendChild(el("h2", {text:"Aviso diario de cumpleanos"}));',
+  '  area.appendChild(el("p", {text:"Te avisa por WhatsApp quien cumple hoy y quien cumple en los proximos 7 dias. Si dejas el telefono vacio, se le manda al dueno.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
+  '  var avisoCumple = cfg.avisoCumpleañosDiario || {activo:true, telefono:"", hora:"09:00"};',
+  '  var avisoCumpleActivo = el("input", {type:"checkbox"}); avisoCumpleActivo.checked = avisoCumple.activo !== false;',
+  '  var lblAvisoActivo = el("label", {text:" Activo"}); lblAvisoActivo.style.display="inline"; lblAvisoActivo.style.fontWeight="normal";',
+  '  area.appendChild(el("div", {}, [avisoCumpleActivo, lblAvisoActivo]));',
+  '  var avisoCumpleTel = textInput(avisoCumple.telefono);',
+  '  var avisoCumpleHora = textInput(avisoCumple.hora || "09:00");',
+  '  area.appendChild(el("div", {class:"row"}, [field("Telefono que recibe el aviso (vacio = dueno)", avisoCumpleTel), field("Hora del aviso (HH:MM)", avisoCumpleHora)]));',
+  '',
   '  area.appendChild(el("h2", {text:"Tacos libres para todo el publico"}));',
   '  area.appendChild(el("p", {text:"Dias abiertos a cualquier cliente (sin minimo de personas), distinto de la promo de cumpleanos.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
   '  var tlp = cfg.tacosLibresPublico || {dias:[], precioPersona:0};',
@@ -355,6 +414,9 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
   '    nuevo.deliveryConfig = cadetesList;',
   '    nuevo.tacosLibresPublico = {dias: DIAS_KEY.filter(function(d){ return tlpDiasChecks[d].checked; }), precioPersona: Number(tlpPrecioInput.value)};',
+  '    nuevo["ofertaCumplea\u00f1osProximo"] = {activo: ofertaCumpleActivo.checked, diasAntes: Number(ofertaCumpleDias.value)};',
+  '    nuevo["cumplea\u00f1osCliente"] = {activo: cumpleCliActivo.checked, descuentoPorcentaje: Number(cumpleCliDesc.value), shotsTequilaSiFestejaEnLocal: cumpleCliShots.checked};',
+  '    nuevo.avisoCumpleañosDiario = {activo: avisoCumpleActivo.checked, telefono: avisoCumpleTel.value, hora: avisoCumpleHora.value};',
   '    nuevo.promosDia = promosDiaData;',
   '    document.getElementById("msg").textContent = "Guardando...";',
   '    document.getElementById("msg").style.color = "#2b2118";',
@@ -856,10 +918,25 @@ app.get("/admin/clientes", (_req, res) => {
     '<button id="btnVer">Ver clientes</button>',
     '</div>',
     '<div id="msg"></div>',
-    '<input type="text" id="buscador" placeholder="Buscar por nombre o teléfono..." style="display:none;font-size:14px;padding:8px;width:100%;box-sizing:border-box;border:1px solid #E9DCC7;border-radius:6px;" />',
+    '<div id="filtros" style="display:none;margin-top:10px;">',
+    '  <button id="btnOrdenVisita" class="btn-toggle" style="background:#F0EBE3;color:#2b2118;padding:8px 12px;font-size:13px;">Por última visita</button>',
+    '  <button id="btnOrdenCumple" class="btn-toggle" style="background:#F0EBE3;color:#2b2118;padding:8px 12px;font-size:13px;">🎂 Próximos cumpleaños</button>',
+    '</div>',
+    '<input type="text" id="buscador" placeholder="Buscar por nombre o teléfono..." style="display:none;font-size:14px;padding:8px;width:100%;box-sizing:border-box;border:1px solid #E9DCC7;border-radius:6px;margin-top:8px;" />',
     '<div id="lista"></div>',
     '<script>',
     'var todos = [];',
+    'var modoOrden = "visita";',
+    'function diasHastaCumple(cumpleanosDDMM) {',
+    '  if (!cumpleanosDDMM) return null;',
+    '  var partes = cumpleanosDDMM.split("-"); var dia = parseInt(partes[0],10); var mes = parseInt(partes[1],10);',
+    '  if (!dia || !mes) return null;',
+    '  var hoy = new Date(); hoy.setHours(0,0,0,0);',
+    '  var anio = hoy.getFullYear();',
+    '  var prox = new Date(anio, mes-1, dia);',
+    '  if (prox < hoy) prox = new Date(anio+1, mes-1, dia);',
+    '  return Math.round((prox - hoy) / (1000*60*60*24));',
+    '}',
     'document.getElementById("btnVer").addEventListener("click", function() {',
     '  var pw = document.getElementById("password").value;',
     '  fetch("/admin/clientes-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
@@ -867,12 +944,15 @@ app.get("/admin/clientes", (_req, res) => {
     '    .then(function(data){',
     '      todos = data;',
     '      document.getElementById("gate").style.display = "none";',
+    '      document.getElementById("filtros").style.display = "block";',
     '      document.getElementById("buscador").style.display = "block";',
     '      document.getElementById("msg").textContent = todos.length + " clientes guardados.";',
     '      pintar(todos);',
     '    })',
     '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
     '});',
+    'document.getElementById("btnOrdenVisita").addEventListener("click", function(){ modoOrden = "visita"; pintar(todos); });',
+    'document.getElementById("btnOrdenCumple").addEventListener("click", function(){ modoOrden = "cumple"; pintar(todos); });',
     'document.getElementById("buscador").addEventListener("input", function() {',
     '  var q = this.value.toLowerCase();',
     '  var filtrados = todos.filter(function(c) { return (c.nombre||"").toLowerCase().indexOf(q) !== -1 || (c.telefono||"").indexOf(q) !== -1; });',
@@ -881,13 +961,25 @@ app.get("/admin/clientes", (_req, res) => {
     'function pintar(lista) {',
     '  var cont = document.getElementById("lista");',
     '  cont.innerHTML = "";',
-    '  var ordenados = lista.slice().sort(function(a,b){ return new Date(b.ultimaVez||0) - new Date(a.ultimaVez||0); });',
+    '  var ordenados = lista.slice();',
+    '  if (modoOrden === "cumple") {',
+    '    ordenados = ordenados.filter(function(c){ return c.cumpleanos; });',
+    '    ordenados.forEach(function(c){ c._dias = diasHastaCumple(c.cumpleanos); });',
+    '    ordenados.sort(function(a,b){ return (a._dias==null?999:a._dias) - (b._dias==null?999:b._dias); });',
+    '  } else {',
+    '    ordenados.sort(function(a,b){ return new Date(b.ultimaVez||0) - new Date(a.ultimaVez||0); });',
+    '  }',
     '  ordenados.forEach(function(c) {',
     '    var div = document.createElement("div");',
     '    div.className = "card";',
     '    var pedidos = (c.historialPedidos||[]).slice(-3).map(function(p){ return p.resumen; }).join(" | ") || "sin pedidos registrados";',
-    '    div.innerHTML = "<span class=\\"nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" +',
-    '      (c.cumpleanos ? "<span class=\\"cumple\\">🎂 " + c.cumpleanos + "</span>" : "") +',
+    '    var etiquetaCumple = "";',
+    '    if (c.cumpleanos) {',
+    '      var dias = c._dias != null ? c._dias : diasHastaCumple(c.cumpleanos);',
+    '      var txt = dias === 0 ? "¡ES HOY!" : ("en " + dias + " días");',
+    '      etiquetaCumple = "<span class=\\"cumple\\">🎂 " + c.cumpleanos + " (" + txt + ")</span>";',
+    '    }',
+    '    div.innerHTML = "<span class=\\"nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" + etiquetaCumple +',
     '      "<div class=\\"tel\\">+" + c.telefono + "</div>" +',
     '      "<div class=\\"detalle\\">Pedidos: " + (c.cantidadPedidos||0) + " · Últimos: " + pedidos + "</div>";',
     '    cont.appendChild(div);',
@@ -1079,5 +1171,120 @@ async function chequearRecordatorios() {
 
 setInterval(chequearRecordatorios, 5 * 60 * 1000); // cada 5 minutos
 setTimeout(chequearRecordatorios, 15 * 1000); // y un primer chequeo a los 15seg de arrancar
+
+// ==================== Aviso diario de cumpleaños próximos ====================
+let ultimoAvisoCumpleañosFecha = null; // para no mandar el aviso dos veces el mismo día
+
+async function chequearAvisoCumpleañosDiario() {
+  try {
+    const config = loadConfig();
+    const cfg = config.avisoCumpleañosDiario;
+    if (!cfg || cfg.activo === false) return;
+
+    const fechaHoy = fechaDeHoyISOArgentina();
+    const horaActual = horaActualArgentina();
+    if (ultimoAvisoCumpleañosFecha === fechaHoy) return; // ya se mandó hoy
+    if (horaActual < (cfg.hora || "09:00")) return; // todavía no es la hora configurada
+
+    const clientes = loadClientes();
+    const conCumple = clientes.filter((c) => c.cumpleanos);
+    if (conCumple.length === 0) {
+      ultimoAvisoCumpleañosFecha = fechaHoy;
+      return;
+    }
+
+    const hoy = conCumple.filter((c) => esCumpleañosHoy(c.cumpleanos, fechaHoy));
+    const proximos = conCumple
+      .map((c) => ({ ...c, diasFaltan: diasHastaProximoCumple(c.cumpleanos, fechaHoy) }))
+      .filter((c) => c.diasFaltan !== null && c.diasFaltan > 0 && c.diasFaltan <= 7)
+      .sort((a, b) => a.diasFaltan - b.diasFaltan);
+
+    if (hoy.length === 0 && proximos.length === 0) {
+      ultimoAvisoCumpleañosFecha = fechaHoy;
+      return;
+    }
+
+    let mensaje = "🎂 *Cumpleaños de clientes*\n\n";
+    if (hoy.length > 0) {
+      mensaje += "*¡Hoy cumplen!*\n";
+      hoy.forEach((c) => {
+        mensaje += `- ${c.nombre || "(sin nombre)"} (+${c.telefono})\n`;
+      });
+      mensaje += "\n";
+    }
+    if (proximos.length > 0) {
+      mensaje += "*Esta semana:*\n";
+      proximos.forEach((c) => {
+        mensaje += `- ${c.nombre || "(sin nombre)"} en ${c.diasFaltan} día${c.diasFaltan === 1 ? "" : "s"} (+${c.telefono})\n`;
+      });
+    }
+
+    const telefonoDestino = soloDigitos(cfg.telefono) || soloDigitos((config.staff && config.staff.dueño && config.staff.dueño.telefono) || "");
+    if (telefonoDestino && telefonoDestino.length >= 10) {
+      const enviado = await sendWhatsappText(telefonoDestino, mensaje);
+      if (enviado) {
+        ultimoAvisoCumpleañosFecha = fechaHoy;
+        console.log("Aviso diario de cumpleaños enviado.");
+      } else {
+        console.log("No se pudo enviar el aviso diario de cumpleaños — se reintenta en el próximo chequeo.");
+      }
+    } else {
+      console.log("Aviso diario de cumpleaños: no hay teléfono configurado (ni dueño cargado) para mandarlo.");
+      ultimoAvisoCumpleañosFecha = fechaHoy;
+    }
+  } catch (err) {
+    console.error("Error chequeando aviso diario de cumpleaños:", err);
+  }
+}
+
+setInterval(chequearAvisoCumpleañosDiario, 5 * 60 * 1000); // cada 5 minutos
+setTimeout(chequearAvisoCumpleañosDiario, 20 * 1000); // primer chequeo a los 20seg de arrancar
+
+// ==================== Oferta proactiva al cliente cuando falta ~1 semana para su cumpleaños ====================
+async function chequearOfertaCumpleañosProximo() {
+  try {
+    const config = loadConfig();
+    const cfg = config.ofertaCumpleañosProximo || { activo: true, diasAntes: 7 };
+    if (cfg.activo === false) return;
+
+    const fechaHoy = fechaDeHoyISOArgentina();
+    const diasAntes = cfg.diasAntes || 7;
+    const clientes = loadClientes();
+    let huboCambios = false;
+
+    for (const c of clientes) {
+      if (!c.cumpleanos) continue;
+      const dias = diasHastaProximoCumple(c.cumpleanos, fechaHoy);
+      const fechaObjetivo = proximoCumpleISO(c.cumpleanos, fechaHoy);
+      if (dias !== diasAntes) continue;
+      if (c.ofertaCumpleEnviadaPara === fechaObjetivo) continue; // ya le mandamos la oferta para este cumpleaños
+
+      const cumpleCfg = config.cumpleañosCliente || {};
+      const nombre = c.nombre ? c.nombre.split(" ")[0] : "";
+      const mensaje =
+        `¡Hola${nombre ? " " + nombre : ""}! 🎉 Nos dimos cuenta que tu cumple se viene la semana que entra — ¡queremos que lo festejes con nosotros en Chaparrita! 🌮\n\n` +
+        `Tenés dos opciones:\n` +
+        `1) Reservás una mesa para vos y los tuyos, comés rico, y te hacemos un ${cumpleCfg.descuentoPorcentaje || 10}% de descuento en la cuenta${cumpleCfg.shotsTequilaSiFestejaEnLocal !== false ? " + una ronda de shots de tequila para brindar 🥂" : ""}.\n` +
+        `2) Si armás algo más grande con más invitados, tenemos promos especiales de cumpleaños "Todo Incluido" (pizza, tacos, hamburguesas o lomitos + bebidas + brindis + torta).\n\n` +
+        `¿Te gustaría reservar? Contanos la fecha, el horario y cuántos son, y lo dejamos todo listo 🙌`;
+
+      const enviado = await sendWhatsappText(c.telefono, mensaje);
+      if (enviado) {
+        c.ofertaCumpleEnviadaPara = fechaObjetivo;
+        huboCambios = true;
+        console.log(`Oferta de cumpleaños próximo enviada a ${c.telefono} (${c.nombre || "sin nombre"}).`);
+      } else {
+        console.log(`No se pudo enviar la oferta de cumpleaños a ${c.telefono} — se reintenta en el próximo chequeo.`);
+      }
+    }
+
+    if (huboCambios) saveClientes(clientes);
+  } catch (err) {
+    console.error("Error chequeando oferta de cumpleaños próximo:", err);
+  }
+}
+
+setInterval(chequearOfertaCumpleañosProximo, 5 * 60 * 1000); // cada 5 minutos
+setTimeout(chequearOfertaCumpleañosProximo, 25 * 1000); // primer chequeo a los 25seg de arrancar
 
 app.listen(PORT, () => console.log(`Chaparrita backend escuchando en el puerto ${PORT}`));
