@@ -47,6 +47,11 @@ function fechaDeHoyISOArgentina() {
   return fmt.format(new Date()); // en-CA da directo formato YYYY-MM-DD
 }
 
+function horaActualArgentina() {
+  const fmt = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Argentina/Buenos_Aires", hour: "2-digit", minute: "2-digit", hour12: false });
+  return fmt.format(new Date()); // HH:MM
+}
+
 // ---- Reservas guardadas (para mandar el recordatorio 1hs antes) ----
 const RESERVAS_PATH = path.join(DATA_DIR, "reservas.json");
 function loadReservas() {
@@ -200,11 +205,33 @@ const ADMIN_CONFIG_PAGE = [
   '  var stf = cfg.staff;',
   '  var cajNombre = textInput(stf.cajera.nombre), cajTel = textInput(stf.cajera.telefono);',
   '  var duenoNombre = textInput(stf.due\u00f1o.nombre), duenoTel = textInput(stf.due\u00f1o.telefono);',
+  '  var cocinaObj = stf.cocina || {nombre:"", telefono:""};',
+  '  var cocinaNombre = textInput(cocinaObj.nombre), cocinaTel = textInput(cocinaObj.telefono);',
   '  area.appendChild(el("div", {class:"row"}, [field("Nombre cajera/o", cajNombre), field("Telefono (con 549...)", cajTel)]));',
   '  area.appendChild(el("div", {class:"row"}, [field("Nombre dueno/a", duenoNombre), field("Telefono (con 549...)", duenoTel)]));',
+  '  area.appendChild(el("div", {class:"row"}, [field("Nombre jefe de cocina", cocinaNombre), field("Telefono (con 549...)", cocinaTel)]));',
+  '  area.appendChild(el("p", {text:"A cocina se le reenvia automaticamente el resumen apenas se confirma un pedido.", style:"font-size:12px;color:#6b6258;margin:2px 0 0 0;"}));',
   '',
   '  var grupoInput = textInput(cfg.grupoReservasWhatsappId);',
   '  area.appendChild(field("ID de WhatsApp del grupo Reservas Chaparrita", grupoInput));',
+  '',
+  '  area.appendChild(el("h2", {text:"Tacos libres para todo el publico"}));',
+  '  area.appendChild(el("p", {text:"Dias abiertos a cualquier cliente (sin minimo de personas), distinto de la promo de cumpleanos.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
+  '  var tlp = cfg.tacosLibresPublico || {dias:[], precioPersona:0};',
+  '  var tlpDiasBox = el("div", {class:"row"});',
+  '  var tlpDiasChecks = {};',
+  '  DIAS_KEY.forEach(function(diaKey) {',
+  '    var chk = el("input", {type:"checkbox"});',
+  '    chk.checked = tlp.dias.indexOf(diaKey) !== -1;',
+  '    tlpDiasChecks[diaKey] = chk;',
+  '    var lbl = el("label", {text:" " + diaKey});',
+  '    lbl.style.display = "inline"; lbl.style.fontWeight = "normal"; lbl.style.marginRight = "10px";',
+  '    var wrap = el("span", {style:"display:inline-flex;align-items:center;margin:4px 10px 4px 0;"}, [chk, lbl]);',
+  '    tlpDiasBox.appendChild(wrap);',
+  '  });',
+  '  area.appendChild(field("Dias con tacos libres", tlpDiasBox));',
+  '  var tlpPrecioInput = numInput(tlp.precioPersona);',
+  '  area.appendChild(field("Precio por persona", tlpPrecioInput));',
   '',
   '  area.appendChild(el("h2", {text:"Delivery - cadetes"}));',
   '  area.appendChild(el("p", {text:"Cargá el telefono con codigo de pais y 9 (ej: 549370XXXXXXX). Solo se le consulta el envio a los que esten Activos.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
@@ -286,9 +313,10 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo["cumplea\u00f1os"].descuentoPresupuestoAMedida = Number(descuentoInput.value) / 100;',
   '    nuevo["cumplea\u00f1os"].se\u00f1aPorcentaje = Number(senaInput.value) / 100;',
   '    nuevo["cumplea\u00f1os"].cuenta = {titular: ctTitular.value, cuit: ctCuit.value, cvu: ctCvu.value, alias: ctAlias.value};',
-  '    nuevo.staff = {cajera:{nombre:cajNombre.value, telefono:cajTel.value}, due\u00f1o:{nombre:duenoNombre.value, telefono:duenoTel.value}};',
+  '    nuevo.staff = {cajera:{nombre:cajNombre.value, telefono:cajTel.value}, due\u00f1o:{nombre:duenoNombre.value, telefono:duenoTel.value}, cocina:{nombre:cocinaNombre.value, telefono:cocinaTel.value}};',
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
   '    nuevo.deliveryConfig = cadetesList;',
+  '    nuevo.tacosLibresPublico = {dias: DIAS_KEY.filter(function(d){ return tlpDiasChecks[d].checked; }), precioPersona: Number(tlpPrecioInput.value)};',
   '    nuevo.promosDia = promosDiaData;',
   '    document.getElementById("msg").textContent = "Guardando...";',
   '    document.getElementById("msg").style.color = "#2b2118";',
@@ -404,13 +432,15 @@ app.post("/webhook", async (req, res) => {
     const menuText = loadMenuText();
     const diaHoy = diaDeHoyArgentina();
     const fechaHoy = fechaDeHoyISOArgentina();
+    const horaActual = horaActualArgentina();
     const promosHoy = (config.promosDia && config.promosDia[diaHoy]) ? config.promosDia[diaHoy].filter((p) => p.activa) : [];
-    const replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy);
+    const replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual);
     console.log(`Respuesta de Claude generada (${replyText.length} caracteres):`, replyText.slice(0, 200));
 
     const { cleanText: sinDatos, datos: datosReserva } = extractReservaDatosMarker(replyText);
     const { cleanText, reservaConfirmada } = extractReservaMarker(sinDatos);
-    const { cleanText: cleanText2, direccionEnvio } = extractConsultaEnvioMarker(cleanText);
+    const { cleanText: sinEnvio, direccionEnvio } = extractConsultaEnvioMarker(cleanText);
+    const { cleanText: cleanText2, pedidoConfirmado } = extractPedidoMarker(sinEnvio);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
@@ -419,6 +449,16 @@ app.post("/webhook", async (req, res) => {
 
     if (reservaConfirmada && config.grupoReservasWhatsappId) {
       await sendWhatsappText(config.grupoReservasWhatsappId, reservaConfirmada);
+    }
+
+    if (pedidoConfirmado) {
+      const telCocina = soloDigitos((config.staff && config.staff.cocina && config.staff.cocina.telefono) || "");
+      if (telCocina && telCocina.length >= 10) {
+        await sendWhatsappText(telCocina, pedidoConfirmado);
+        console.log(`Pedido confirmado reenviado a cocina (${telCocina}).`);
+      } else {
+        console.log("Hubo un pedido confirmado pero no hay teléfono de cocina cargado en config.staff.cocina.");
+      }
     }
 
     if (datosReserva && datosReserva.fecha && datosReserva.hora) {
@@ -451,9 +491,11 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Si el cliente mandó una imagen (probablemente un comprobante), le reenviamos la imagen al equipo.
+    // Si el cliente mandó una imagen (probablemente un comprobante), le reenviamos la imagen a quienes manejan pagos (NO a cocina).
     if (message.type === "image" && message.image?.id) {
-      const staffPhones = Object.values(config.staff || {})
+      const staff = config.staff || {};
+      const staffPhones = [staff.cajera, staff.dueño]
+        .filter(Boolean)
         .map((s) => soloDigitos(s.telefono))
         .filter((tel) => tel && tel.length >= 10);
       for (const tel of staffPhones) {
@@ -499,7 +541,7 @@ async function downloadWhatsappMedia(mediaId) {
 }
 
 // ==================== Llamada a la API de Claude ====================
-async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy) {
+async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -510,7 +552,7 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy)
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
-      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy),
+      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual),
       messages: history,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
@@ -541,6 +583,16 @@ function extractReservaDatosMarker(text) {
     console.error("No se pudo parsear RESERVA_DATOS:", match[1]);
     return { cleanText, datos: null };
   }
+}
+
+// Saca la marca interna [[PEDIDO_CONFIRMADO]] y devuelve el texto limpio + el resumen para cocina
+function extractPedidoMarker(text) {
+  const marker = "[[PEDIDO_CONFIRMADO]]";
+  const idx = text.indexOf(marker);
+  if (idx === -1) return { cleanText: text, pedidoConfirmado: null };
+  const cleanText = text.slice(0, idx).trim();
+  const pedidoConfirmado = text.slice(idx + marker.length).trim();
+  return { cleanText, pedidoConfirmado };
 }
 
 // Saca la marca interna [[RESERVA_CONFIRMADA]] y devuelve el texto limpio + el resumen a reenviar

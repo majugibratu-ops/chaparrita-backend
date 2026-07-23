@@ -50,7 +50,12 @@
   },
   "staff": {
     "cajera": { "nombre": "Valentina", "telefono": "+54 9 370 CAMBIAR" },
-    "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 CAMBIAR" }
+    "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 CAMBIAR" },
+    "cocina": { "nombre": "Jefe de cocina", "telefono": "+54 9 370 CAMBIAR" }
+  },
+  "tacosLibresPublico": {
+    "dias": ["Miércoles", "Jueves", "Domingo"],
+    "precioPersona": 12500
   },
   "deliveryConfig": [],
   "grupoReservasWhatsappId": "CAMBIAR-ID-DEL-GRUPO-RESERVAS-CHAPARRITA"
