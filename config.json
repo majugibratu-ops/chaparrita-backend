@@ -1,4 +1,5 @@
 {
+  "asistenteActivo": true,
   "horarios": "Confirmar horarios reales (placeholder: Martes a Domingo de 19:00 a 01:00hs, lunes cerrado)",
   "tiendaOnlineUrl": "https://CAMBIAR-POR-LINK-REAL",
   "agotados": [],
@@ -6,6 +7,15 @@
     "adentro": "Aire acondicionado y proyector",
     "patio": "2 televisores de 44 pulgadas y ventiladores",
     "vereda": "Se ven los televisores del patio interno desde afuera"
+  },
+  "promosDia": {
+    "Lunes": [],
+    "Martes": [],
+    "Miércoles": [],
+    "Jueves": [],
+    "Viernes": [],
+    "Sábado": [],
+    "Domingo": []
   },
   "cumpleaños": {
     "minPersonas": 10,
@@ -42,5 +52,6 @@
     "cajera": { "nombre": "Valentina", "telefono": "+54 9 370 CAMBIAR" },
     "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 CAMBIAR" }
   },
+  "deliveryConfig": [],
   "grupoReservasWhatsappId": "CAMBIAR-ID-DEL-GRUPO-RESERVAS-CHAPARRITA"
 }
