@@ -1,11 +1,11 @@
 {
   "asistenteActivo": true,
   "horarios": "Confirmar horarios reales (placeholder: Martes a Domingo de 19:00 a 01:00hs, lunes cerrado)",
-  "tiendaOnlineUrl": "https://CAMBIAR-POR-LINK-REAL",
+  "tiendaOnlineUrl": "https://menu.fu.do/chaparrita",
   "agotados": [],
   "amenities": {
     "adentro": "Aire acondicionado y proyector",
-    "patio": "2 televisores de 44 pulgadas y ventiladores",
+    "patio": "2 televisores de 55 pulgadas y ventiladores",
     "vereda": "Se ven los televisores del patio interno desde afuera"
   },
   "promosDia": {
@@ -20,15 +20,15 @@
   "cumpleaños": {
     "minPersonas": 10,
     "paquetes": [
-      { "nombre": "Pizza y Festejo", "emoji": "🍕", "precioPersona": 15000, "descripcion": "" },
+      { "nombre": "Pizza y Festejo", "emoji": "🍕", "precioPersona": 15000, "descripcion": "Podés elegir la variedad que quieras de Pizza de nuestra carta (1 cada dos personas)" },
       {
         "nombre": "Taco Libre",
         "emoji": "🌮",
         "precioPersona": 18500,
         "descripcion": "Nuestra Promo Taco Libre es un viaje directo a México diseñado para que prueben de todo y siempre coman excelente.\n\nPara arrancar: recibimos a la mesa con una entrada de Nachos y dos salsas a elección, de nuestra gran variedad: Mayonesa, Lactonesa de Ajo, Salsa de choclo, Mayonesa Verde (de Palta), Pico de gallo (con o sin picante), Salsa picante, Ketchup, Guacamole, ChapaGolf, MayoCesar o Teriyaki.\n\nEl Festín (Taco Libre) incluye: Tacos (Birria, Cerdo, Pollo), Gringas (Birria, Cerdo, Pollo), Papas Poblanas y Mini Quesadillas (Queso y cebolla / Queso, tomate y orégano).\n\n¿Cómo es la dinámica? Servimos de a una unidad por persona en tandas, para que cada bocado llegue bien calentito. Las tandas salen en un orden predeterminado (sistema de carrusel) para que todos prueben la variedad completa. Terminada la tanda, se puede repetir lo que quieran sin límite; entre tanda y tanda hay una demora de unos 12 a 15 minutos para mantener la frescura y el punto de cocción.\n\nEs la opción ideal para grupos que disfrutan comer rico, variado y siempre recién hecho."
       },
-      { "nombre": "Hamburguesas", "emoji": "🍔", "precioPersona": 20500, "descripcion": "" },
-      { "nombre": "Lomitos", "emoji": "🌯", "precioPersona": 25000, "descripcion": "" }
+      { "nombre": "Hamburguesas", "emoji": "🍔", "precioPersona": 20500, "descripcion": "Podés elegir la variedad que quieras de Hamburguesas de nuestra carta (1 por persona)" },
+      { "nombre": "Lomitos", "emoji": "🌯", "precioPersona": 25000, "descripcion": "Podés elegir la variedad que quieras de Lomitos de nuestra carta (1 por persona)" }
     ],
     "basePrecios": {
       "pizza": 18000,
@@ -49,9 +49,9 @@
     }
   },
   "staff": {
-    "cajera": { "nombre": "Valentina", "telefono": "+54 9 370 CAMBIAR" },
-    "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 CAMBIAR" },
-    "cocina": { "nombre": "Jefe de cocina", "telefono": "+54 9 370 CAMBIAR" }
+    "cajera": { "nombre": "Valentina", "telefono": "+54 9 370 477-6482" },
+    "dueño": { "nombre": "Marcelo Ginard", "telefono": "+54 9 370 433-2207" },
+    "cocina": { "nombre": "Jefe de cocina", "telefono": "+54 9 370 495-5417" }
   },
   "ofertaCumpleañosProximo": {
     "activo": true,
@@ -71,6 +71,9 @@
     "dias": ["Miércoles", "Jueves", "Domingo"],
     "precioPersona": 12500
   },
-  "deliveryConfig": [],
+  "deliveryConfig": [
+    { "nombre": "Speedy", "telefono": "+54 9 370 430-3310", "activo": true },
+    { "nombre": "Alejandro", "telefono": "+54 9 370 424-7690", "activo": true }
+  ],
   "grupoReservasWhatsappId": "CAMBIAR-ID-DEL-GRUPO-RESERVAS-CHAPARRITA"
 }
