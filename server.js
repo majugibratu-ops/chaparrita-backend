@@ -11,16 +11,24 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
+// ---- Carpeta de datos que necesita persistir entre reinicios (hay que montarle
+//      un Volume en Railway — ver README) ----
+const DATA_DIR = path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
 // ---- Config del negocio (editable sin tocar código) ----
-const CONFIG_PATH = path.join(__dirname, "config.json");
+const CONFIG_PATH = path.join(DATA_DIR, "config.json");
+const LEGACY_CONFIG_PATH = path.join(__dirname, "config.json");
+if (!fs.existsSync(CONFIG_PATH) && fs.existsSync(LEGACY_CONFIG_PATH)) {
+  fs.copyFileSync(LEGACY_CONFIG_PATH, CONFIG_PATH);
+  console.log("Migrado config.json a data/config.json (primera vez que arranca con esta versión).");
+}
 function loadConfig() {
   return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 }
 
 // ---- Menú del local (se puede reemplazar subiendo un PDF nuevo desde /admin) ----
-const DATA_DIR = path.join(__dirname, "data");
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 function loadMenuText() {
   try {
     return fs.readFileSync(MENU_PATH, "utf8");
