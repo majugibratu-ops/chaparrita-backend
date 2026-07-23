@@ -65,6 +65,44 @@ function saveReservas(lista) {
   fs.writeFileSync(RESERVAS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
+// ---- Perfiles de clientes (nombre, cumpleaños, historial de pedidos) ----
+const CLIENTES_PATH = path.join(DATA_DIR, "clientes.json");
+function loadClientes() {
+  try {
+    return JSON.parse(fs.readFileSync(CLIENTES_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveClientes(lista) {
+  fs.writeFileSync(CLIENTES_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+function buscarCliente(lista, telefono) {
+  return lista.find((c) => soloDigitos(c.telefono) === soloDigitos(telefono));
+}
+function esCumpleañosHoy(cumpleanosDDMM, fechaHoyISO) {
+  if (!cumpleanosDDMM || !fechaHoyISO) return false;
+  const hoyDDMM = fechaHoyISO.slice(5); // "YYYY-MM-DD" -> "MM-DD"
+  const [dia, mes] = cumpleanosDDMM.split("-");
+  if (!dia || !mes) return false;
+  const normalizado = `${mes.padStart(2, "0")}-${dia.padStart(2, "0")}`;
+  return normalizado === hoyDDMM;
+}
+
+// Saca la marca interna [[CLIENTE_DATOS: {...}]] y devuelve el texto limpio + los datos aprendidos
+function extractClienteDatosMarker(text) {
+  const regex = /\[\[CLIENTE_DATOS:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, datosCliente: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, datosCliente: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear CLIENTE_DATOS:", match[1]);
+    return { cleanText, datosCliente: null };
+  }
+}
+
 const ADMIN_CONFIG_PAGE = [
   '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
   '<title>Chaparrita - Editar configuracion</title>',
@@ -434,13 +472,16 @@ app.post("/webhook", async (req, res) => {
     const fechaHoy = fechaDeHoyISOArgentina();
     const horaActual = horaActualArgentina();
     const promosHoy = (config.promosDia && config.promosDia[diaHoy]) ? config.promosDia[diaHoy].filter((p) => p.activa) : [];
-    const replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual);
+    const clientes = loadClientes();
+    const perfilCliente = buscarCliente(clientes, from) || null;
+    const replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
     console.log(`Respuesta de Claude generada (${replyText.length} caracteres):`, replyText.slice(0, 200));
 
     const { cleanText: sinDatos, datos: datosReserva } = extractReservaDatosMarker(replyText);
     const { cleanText, reservaConfirmada } = extractReservaMarker(sinDatos);
     const { cleanText: sinEnvio, direccionEnvio } = extractConsultaEnvioMarker(cleanText);
-    const { cleanText: cleanText2, pedidoConfirmado } = extractPedidoMarker(sinEnvio);
+    const { cleanText: sinPedido, pedidoConfirmado } = extractPedidoMarker(sinEnvio);
+    const { cleanText: cleanText2, datosCliente } = extractClienteDatosMarker(sinPedido);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
@@ -459,6 +500,28 @@ app.post("/webhook", async (req, res) => {
       } else {
         console.log("Hubo un pedido confirmado pero no hay teléfono de cocina cargado en config.staff.cocina.");
       }
+    }
+
+    // Actualizamos el perfil del cliente: datos nuevos que haya contado (nombre/cumpleaños) y su historial de pedidos.
+    if (datosCliente || pedidoConfirmado) {
+      let cliente = buscarCliente(clientes, from);
+      if (!cliente) {
+        cliente = { telefono: from, nombre: "", cumpleanos: "", primeraVez: new Date().toISOString(), ultimaVez: new Date().toISOString(), cantidadPedidos: 0, historialPedidos: [], notas: "" };
+        clientes.push(cliente);
+      }
+      if (datosCliente) {
+        if (datosCliente.nombre) cliente.nombre = datosCliente.nombre;
+        if (datosCliente.cumpleanos) cliente.cumpleanos = datosCliente.cumpleanos;
+      }
+      if (pedidoConfirmado) {
+        const itemsMatch = pedidoConfirmado.match(/Ítems:\s*(.+)/);
+        cliente.historialPedidos = cliente.historialPedidos || [];
+        cliente.historialPedidos.push({ fecha: new Date().toISOString(), resumen: itemsMatch ? itemsMatch[1].trim() : pedidoConfirmado.slice(0, 200) });
+        if (cliente.historialPedidos.length > 10) cliente.historialPedidos = cliente.historialPedidos.slice(-10);
+        cliente.cantidadPedidos = (cliente.cantidadPedidos || 0) + 1;
+      }
+      cliente.ultimaVez = new Date().toISOString();
+      saveClientes(clientes);
     }
 
     if (datosReserva && datosReserva.fecha && datosReserva.hora) {
@@ -541,7 +604,7 @@ async function downloadWhatsappMedia(mediaId) {
 }
 
 // ==================== Llamada a la API de Claude ====================
-async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual) {
+async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -552,7 +615,7 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy,
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
-      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual),
+      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente),
       messages: history,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
@@ -697,6 +760,7 @@ app.get("/admin", (_req, res) => {
     <body>
       <h1>🌮 Panel de Chaparrita</h1>
       <a class="tile" href="/admin/switch"><b>🔌 Prender / apagar el asistente</b>Pausalo cuando un operador quiera atender en persona.</a>
+      <a class="tile" href="/admin/clientes"><b>👥 Clientes conocidos</b>Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</a>
       <a class="tile" href="/admin/menu"><b>📋 Actualizar el menú</b>Subir un PDF nuevo con precios y productos.</a>
       <a class="tile" href="/admin/config"><b>⚙️ Precios, horarios, promos y teléfonos</b>Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</a>
     </body>
@@ -766,6 +830,83 @@ app.post("/admin/upload-menu", upload.single("menuPdf"), async (req, res) => {
 });
 
 // ==================== Switch rápido para prender/apagar el asistente ====================
+app.get("/admin/clientes", (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Clientes</title>',
+    '<style>',
+    'body{font-family:sans-serif;max-width:700px;margin:30px auto;padding:0 16px;color:#2b2118;}',
+    'h1{font-size:20px}',
+    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
+    'button{font-size:15px;padding:10px 16px;border:none;border-radius:6px;cursor:pointer;margin-top:10px;background:#C0392B;color:#fff}',
+    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;margin-bottom:10px}',
+    '.card{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px}',
+    '.nombre{font-weight:bold;font-size:15px}',
+    '.tel{font-size:12px;color:#6b6258}',
+    '.detalle{font-size:13px;margin-top:6px}',
+    '.cumple{display:inline-block;background:#FCE4EC;color:#C0392B;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:bold;margin-left:6px}',
+    '#msg{margin-top:14px;font-weight:bold}',
+    '#buscador{margin-top:16px}',
+    '</style></head><body>',
+    '<a class="back" href="/admin">&larr; Volver al panel</a>',
+    '<h1>👥 Clientes conocidos</h1>',
+    '<div id="gate">',
+    '<label style="font-weight:bold;font-size:13px;">Contraseña de administrador</label>',
+    '<input type="password" id="password" />',
+    '<button id="btnVer">Ver clientes</button>',
+    '</div>',
+    '<div id="msg"></div>',
+    '<input type="text" id="buscador" placeholder="Buscar por nombre o teléfono..." style="display:none;font-size:14px;padding:8px;width:100%;box-sizing:border-box;border:1px solid #E9DCC7;border-radius:6px;" />',
+    '<div id="lista"></div>',
+    '<script>',
+    'var todos = [];',
+    'document.getElementById("btnVer").addEventListener("click", function() {',
+    '  var pw = document.getElementById("password").value;',
+    '  fetch("/admin/clientes-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    '    .then(function(data){',
+    '      todos = data;',
+    '      document.getElementById("gate").style.display = "none";',
+    '      document.getElementById("buscador").style.display = "block";',
+    '      document.getElementById("msg").textContent = todos.length + " clientes guardados.";',
+    '      pintar(todos);',
+    '    })',
+    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+    '});',
+    'document.getElementById("buscador").addEventListener("input", function() {',
+    '  var q = this.value.toLowerCase();',
+    '  var filtrados = todos.filter(function(c) { return (c.nombre||"").toLowerCase().indexOf(q) !== -1 || (c.telefono||"").indexOf(q) !== -1; });',
+    '  pintar(filtrados);',
+    '});',
+    'function pintar(lista) {',
+    '  var cont = document.getElementById("lista");',
+    '  cont.innerHTML = "";',
+    '  var ordenados = lista.slice().sort(function(a,b){ return new Date(b.ultimaVez||0) - new Date(a.ultimaVez||0); });',
+    '  ordenados.forEach(function(c) {',
+    '    var div = document.createElement("div");',
+    '    div.className = "card";',
+    '    var pedidos = (c.historialPedidos||[]).slice(-3).map(function(p){ return p.resumen; }).join(" | ") || "sin pedidos registrados";',
+    '    div.innerHTML = "<span class=\\"nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" +',
+    '      (c.cumpleanos ? "<span class=\\"cumple\\">🎂 " + c.cumpleanos + "</span>" : "") +',
+    '      "<div class=\\"tel\\">+" + c.telefono + "</div>" +',
+    '      "<div class=\\"detalle\\">Pedidos: " + (c.cantidadPedidos||0) + " · Últimos: " + pedidos + "</div>";',
+    '    cont.appendChild(div);',
+    '  });',
+    '  if (ordenados.length === 0) { cont.innerHTML = "<p>No hay clientes que coincidan.</p>"; }',
+    '}',
+    '</' + 'script>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/clientes-data", (req, res) => {
+  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña incorrecta" });
+  }
+  res.json(loadClientes());
+});
+
 app.get("/admin/switch", (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',

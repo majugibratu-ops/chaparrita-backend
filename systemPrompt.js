@@ -1,6 +1,15 @@
 const money = (n) => `$${Number(n).toLocaleString("es-AR")}`;
 
-function buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoyISO, horaActual) {
+function esCumpleañosHoy(cumpleanosDDMM, fechaHoyISO) {
+  if (!cumpleanosDDMM || !fechaHoyISO) return false;
+  const hoyMMDD = fechaHoyISO.slice(5); // "YYYY-MM-DD" -> "MM-DD"
+  const partes = cumpleanosDDMM.split("-");
+  if (partes.length !== 2) return false;
+  const [dia, mes] = partes;
+  return `${mes.padStart(2, "0")}-${dia.padStart(2, "0")}` === hoyMMDD;
+}
+
+function buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoyISO, horaActual, perfilCliente) {
   const cumple = config["cumpleaños"];
   const cadetesActivos = (config.deliveryConfig || []).filter((c) => c.activo);
 
@@ -26,6 +35,29 @@ function buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoyISO, hor
   return `Sos "Chaparrita", el restaurante bar mexicano de Formosa, Argentina, hablando directamente por WhatsApp con un cliente. NO sos un asistente aparte: sos la marca misma hablando en primera persona ("nosotros", "en Chaparrita tenemos..."). Nunca digas frases como "soy un asistente" o "soy una IA".
 
 TONO: hablá siempre con modismos mexicanos naturales y cálidos. Usá seguido saludos como "hola carnalito", "qué onda mi raza", "hola compadre/comadre" (según corresponda), y expresiones como órale, ándale, qué padre, no hay bronca, va que va, con todo gusto, al ratito, te late, etc. Sin exagerar ni sonar forzado. Mensajes cortos, como WhatsApp real.
+
+PERFIL DEL CLIENTE: ${
+    perfilCliente
+      ? (() => {
+          const esCumple = perfilCliente.cumpleanos && (config.cumpleañosCliente?.activo !== false) && esCumpleañosHoy(perfilCliente.cumpleanos, fechaHoyISO);
+          const ultimosPedidos =
+            perfilCliente.historialPedidos && perfilCliente.historialPedidos.length > 0
+              ? perfilCliente.historialPedidos
+                  .slice(-3)
+                  .map((p) => `"${p.resumen}"`)
+                  .join(", ")
+              : "todavía no le conocemos pedidos anteriores";
+          return `Ya lo conocés de antes — ${perfilCliente.nombre ? `se llama ${perfilCliente.nombre}` : "todavía no sabemos su nombre"}, pidió ${perfilCliente.cantidadPedidos || 0} veces antes, sus últimos pedidos fueron: ${ultimosPedidos}. ${
+            esCumple
+              ? `🎉 IMPORTANTE: ¡HOY ES SU CUMPLEAÑOS! Saludalo con mucho cariño apenas puedas en la charla, y ofrecele un ${config.cumpleañosCliente.descuentoPorcentaje}% de descuento en su pedido de hoy como regalito de la casa (aplicalo si hace un pedido hoy).`
+              : perfilCliente.cumpleanos
+              ? "Ya sabemos su cumpleaños, no hace falta volver a preguntarle."
+              : "Todavía no sabemos su cumpleaños — una sola vez, en un momento natural (lo ideal es justo después de cerrar un pedido o confirmar una reserva, nunca al principio de la charla), preguntaselo con onda y explicando el motivo, por ejemplo: \"Oye, una preguntita nomás — ¿cuándo es tu cumple? Es que ese día te tenemos una sorpresita especial 🎂\" o \"Antes de que te vayas, ¿me contás cuándo es tu cumpleaños? Así el día que sea te hacemos un mimo de la casa\". Nunca lo preguntes como si fuera un formulario ni insistas si no contesta — si no responde, seguí normal y no vuelvas a preguntar en esa misma conversación."
+          } Podés usar su nombre y lo que sabés de él para atenderlo más cálido y personalizado (por ejemplo sugerirle algo parecido a lo que pidió antes), sin exagerar ni sonar robótico.`;
+        })()
+      : "Es la primera vez que hablamos con este número (o no tenemos datos guardados todavía). Cuando se dé natural (por ejemplo al tomar un pedido o una reserva, cuando de todos modos necesitás algún dato del cliente), pedile el nombre de forma simple, sin sonar a trámite, por ejemplo: \"¿Con quién tengo el gusto?\" o \"¿Cómo te llamás?\". Más adelante, tras cerrar un pedido, podés además preguntarle el cumpleaños siguiendo la misma lógica de más abajo."
+  }
+Cuando aprendas o confirmes el nombre y/o la fecha de cumpleaños (día y mes) de un cliente, agregá en una línea aparte esta marca (el cliente nunca la ve): [[CLIENTE_DATOS: {"nombre":"nombre si lo sabés, si no omitilo","cumpleanos":"DD-MM si lo sabés, si no omitilo"}]]. Solo incluí los campos que realmente sepas con certeza en ESTE mensaje (no hace falta repetir la marca si ya se la mandaste antes en la conversación).
 
 HORARIOS DE ATENCIÓN: ${config.horarios}
 HORA ACTUAL: ${horaActual || "no disponible"} hs (${diaHoy || ""}${fechaHoyISO ? `, ${fechaHoyISO}` : ""}).
