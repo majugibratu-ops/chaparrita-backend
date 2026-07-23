@@ -158,6 +158,8 @@ const ADMIN_CONFIG_PAGE = [
   '<label>Contrasena de administrador</label>',
   '<input type="password" id="password" />',
   '<button class="btn-primary" id="btnCargar">Cargar configuracion</button>',
+  '<button class="btn-secondary" id="btnReset" style="margin-top:8px;">Restaurar valores del repositorio (GitHub)</button>',
+  '<p style="font-size:11px;color:#6b6258;margin-top:4px;">Usalo solo si los cambios que hacés acá no se guardan al reiniciar el servidor. Pisa TODO lo que hayas cambiado en este panel con lo que esté subido en GitHub.</p>',
   '</div>',
   '<div id="msg"></div>',
   '<div id="formArea"></div>',
@@ -181,6 +183,14 @@ const ADMIN_CONFIG_PAGE = [
   '  fetch("/admin/config-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
   '    .then(function(r){ if (!r.ok) { throw new Error("Contrasena incorrecta"); } return r.json(); })',
   '    .then(function(data){ cfg = data; cfg.__pw = pw; renderForm(); document.getElementById("gate").style.display="none"; document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent=""; })',
+  '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+  '});',
+  'document.getElementById("btnReset").addEventListener("click", function() {',
+  '  var pw = document.getElementById("password").value;',
+  '  if (!confirm("Esto va a pisar TODO lo que hayas cargado en el panel con lo que esta subido en GitHub ahora mismo. Seguro?")) return;',
+  '  fetch("/admin/config-reset-from-repo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+  '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo restaurar (revisa la contrasena)"); } return r.json(); })',
+  '    .then(function(data){ cfg = data.config; cfg.__pw = pw; renderForm(); document.getElementById("gate").style.display="none"; document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent = "Listo, se restauro desde el repositorio."; document.getElementById("msg").style.color = "#2e7d32"; })',
   '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
   '});',
   '',
@@ -1113,6 +1123,25 @@ app.post("/admin/config-save", (req, res) => {
   } catch (err) {
     console.error("Error al guardar config:", err);
     res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+// Fuerza a copiar el config.json que viene con el código (el del repo) al volumen persistente,
+// pisando lo que haya ahí guardado. Útil cuando el volumen quedó con datos viejos.
+app.post("/admin/config-reset-from-repo", (req, res) => {
+  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña incorrecta" });
+  }
+  try {
+    if (!fs.existsSync(LEGACY_CONFIG_PATH)) {
+      return res.status(404).json({ error: "No se encontró config.json en el repo" });
+    }
+    fs.copyFileSync(LEGACY_CONFIG_PATH, CONFIG_PATH);
+    console.log("Config restaurada a la fuerza desde el config.json del repositorio.");
+    res.json({ ok: true, config: loadConfig() });
+  } catch (err) {
+    console.error("Error al restaurar config desde el repo:", err);
+    res.status(500).json({ error: "No se pudo restaurar" });
   }
 });
 
