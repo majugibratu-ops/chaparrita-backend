@@ -833,6 +833,7 @@ app.get("/admin", (_req, res) => {
       <h1>🌮 Panel de Chaparrita</h1>
       <a class="tile" href="/admin/switch"><b>🔌 Prender / apagar el asistente</b>Pausalo cuando un operador quiera atender en persona.</a>
       <a class="tile" href="/admin/clientes"><b>👥 Clientes conocidos</b>Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</a>
+      <a class="tile" href="/admin/inactivos"><b>📉 Clientes inactivos</b>Detecta clientes que dejaron de pedir y te avisa por WhatsApp.</a>
       <a class="tile" href="/admin/menu"><b>📋 Actualizar el menú</b>Subir un PDF nuevo con precios y productos.</a>
       <a class="tile" href="/admin/config"><b>⚙️ Precios, horarios, promos y teléfonos</b>Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</a>
     </body>
@@ -1142,6 +1143,129 @@ app.post("/admin/config-reset-from-repo", (req, res) => {
   } catch (err) {
     console.error("Error al restaurar config desde el repo:", err);
     res.status(500).json({ error: "No se pudo restaurar" });
+  }
+});
+
+// ==================== Clientes inactivos (dejaron de pedir) ====================
+const PISO_MINIMO_DIAS_INACTIVO = 15;
+
+function calcularClientesInactivos(clientes) {
+  const ahoraMs = Date.now();
+  return clientes
+    .map((c) => {
+      const pedidos = (c.historialPedidos || []).slice().sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+      if (pedidos.length < 3) return null; // necesitamos al menos 3 pedidos para calcular un ritmo real
+
+      const fechasMs = pedidos.map((p) => new Date(p.fecha).getTime()).filter((t) => !isNaN(t));
+      if (fechasMs.length < 3) return null;
+
+      const intervalos = [];
+      for (let i = 1; i < fechasMs.length; i++) intervalos.push(fechasMs[i] - fechasMs[i - 1]);
+      const promedioDias = intervalos.reduce((a, b) => a + b, 0) / intervalos.length / (1000 * 60 * 60 * 24);
+
+      const ultimaFechaMs = fechasMs[fechasMs.length - 1];
+      const diasSinPedir = (ahoraMs - ultimaFechaMs) / (1000 * 60 * 60 * 24);
+      const umbral = Math.max(PISO_MINIMO_DIAS_INACTIVO, promedioDias * 2);
+
+      if (diasSinPedir < umbral) return null;
+
+      return {
+        nombre: c.nombre || "(sin nombre)",
+        telefono: c.telefono,
+        diasSinPedir: Math.round(diasSinPedir),
+        promedioDias: Math.round(promedioDias),
+        ultimoPedido: pedidos[pedidos.length - 1].resumen || "",
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.diasSinPedir - a.diasSinPedir);
+}
+
+function construirMensajeInactivos(inactivos) {
+  let mensaje = `📉 *Clientes que dejaron de pedir* (${inactivos.length})\n\n`;
+  inactivos.forEach((c) => {
+    mensaje += `👤 *${c.nombre}* (+${c.telefono})\n`;
+    mensaje += `Pedía cada ~${c.promedioDias} días, hace ${c.diasSinPedir} días que no pide.\n`;
+    mensaje += `Último pedido: ${c.ultimoPedido}\n\n`;
+  });
+  mensaje += `Ofreceles un 10% OFF en el próximo pedido si querés reactivarlos 🌮`;
+  return mensaje;
+}
+
+app.get("/admin/inactivos", (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Clientes inactivos</title>',
+    '<style>',
+    'body{font-family:sans-serif;max-width:700px;margin:30px auto;padding:0 16px;color:#2b2118;}',
+    'h1{font-size:20px}',
+    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
+    'button{font-size:15px;padding:10px 16px;border:none;border-radius:6px;cursor:pointer;margin-top:10px;background:#C0392B;color:#fff}',
+    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;margin-bottom:10px}',
+    '.card{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px}',
+    '.nombre{font-weight:bold;font-size:15px}',
+    '.tel{font-size:12px;color:#6b6258}',
+    '.detalle{font-size:13px;margin-top:6px}',
+    '#msg{margin-top:14px;font-weight:bold}',
+    '</style></head><body>',
+    '<a class="back" href="/admin">&larr; Volver al panel</a>',
+    '<h1>📉 Clientes inactivos</h1>',
+    '<p style="font-size:13px;color:#6b6258">Detecta clientes que pedían regularmente y hace rato no piden. Al revisar, también te llega un aviso a WhatsApp con la lista.</p>',
+    '<input type="password" id="password" placeholder="Contraseña de administrador" />',
+    '<button id="btnVer">Revisar clientes inactivos</button>',
+    '<div id="msg"></div>',
+    '<div id="lista"></div>',
+    '<script>',
+    'document.getElementById("btnVer").addEventListener("click", function() {',
+    '  var pw = document.getElementById("password").value;',
+    '  document.getElementById("msg").textContent = "Revisando...";',
+    '  document.getElementById("msg").style.color = "#2b2118";',
+    '  fetch("/admin/inactivos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    '    .then(function(data){',
+    '      var cont = document.getElementById("lista");',
+    '      cont.innerHTML = "";',
+    '      data.inactivos.forEach(function(c) {',
+    '        var div = document.createElement("div");',
+    '        div.className = "card";',
+    '        div.innerHTML = "<span class=\\"nombre\\">" + c.nombre + "</span><div class=\\"tel\\">+" + c.telefono + "</div>" +',
+    '          "<div class=\\"detalle\\">Pedía cada ~" + c.promedioDias + " días · hace " + c.diasSinPedir + " días que no pide</div>" +',
+    '          "<div class=\\"detalle\\">Último pedido: " + c.ultimoPedido + "</div>";',
+    '        cont.appendChild(div);',
+    '      });',
+    '      var txt = data.inactivos.length + " clientes inactivos encontrados.";',
+    '      txt += data.avisoEnviado ? " Te mandamos el resumen por WhatsApp." : (data.inactivos.length > 0 ? " (No se pudo mandar el WhatsApp — revisá el teléfono del dueño en Configuración.)" : "");',
+    '      document.getElementById("msg").textContent = txt;',
+    '      document.getElementById("msg").style.color = "#2e7d32";',
+    '    })',
+    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+    '});',
+    '</' + 'script>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/inactivos-data", async (req, res) => {
+  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña incorrecta" });
+  }
+  try {
+    const clientes = loadClientes();
+    const inactivos = calcularClientesInactivos(clientes);
+    const config = loadConfig();
+    const telefonoDestino = soloDigitos((config.staff && config.staff.dueño && config.staff.dueño.telefono) || "");
+
+    let avisoEnviado = false;
+    if (inactivos.length > 0 && telefonoDestino && telefonoDestino.length >= 10) {
+      const mensaje = construirMensajeInactivos(inactivos);
+      avisoEnviado = await sendWhatsappText(telefonoDestino, mensaje);
+    }
+
+    res.json({ inactivos, avisoEnviado });
+  } catch (err) {
+    console.error("Error calculando clientes inactivos:", err);
+    res.status(500).json({ error: "No se pudo calcular" });
   }
 });
 
