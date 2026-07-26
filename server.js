@@ -113,6 +113,39 @@ function chatEnModoManual(telefono) {
   const chat = inbox[soloDigitos(telefono)];
   return !!(chat && chat.modoManual);
 }
+
+// ---- Postulantes / CVs ----
+const PUESTOS_DISPONIBLES = ["mozo", "cajero", "barman", "cocinero", "ayudante de cocina", "bachero"];
+const CVS_DIR = path.join(DATA_DIR, "cvs");
+if (!fs.existsSync(CVS_DIR)) fs.mkdirSync(CVS_DIR, { recursive: true });
+const POSTULANTES_PATH = path.join(DATA_DIR, "postulantes.json");
+function loadPostulantes() {
+  try {
+    return JSON.parse(fs.readFileSync(POSTULANTES_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function savePostulantes(lista) {
+  fs.writeFileSync(POSTULANTES_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+// Busca un postulante que ya haya dado nombre+puesto pero todavía no mandó el CV.
+function buscarPostulantePendiente(lista, telefono) {
+  return lista.find((p) => soloDigitos(p.telefono) === soloDigitos(telefono) && p.estado === "esperando_cv");
+}
+// Saca la marca interna [[POSTULANTE_DATOS: {...}]] y devuelve el texto limpio + los datos
+function extractPostulanteDatosMarker(text) {
+  const regex = /\[\[POSTULANTE_DATOS:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, datosPostulante: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, datosPostulante: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear POSTULANTE_DATOS:", match[1]);
+    return { cleanText, datosPostulante: null };
+  }
+}
 function esCumpleañosHoy(cumpleanosDDMM, fechaHoyISO) {
   if (!cumpleanosDDMM || !fechaHoyISO) return false;
   const hoyDDMM = fechaHoyISO.slice(5); // "YYYY-MM-DD" -> "MM-DD"
@@ -164,31 +197,158 @@ function extractClienteDatosMarker(text) {
   }
 }
 
+// ==================== Sistema de diseño compartido del panel admin ====================
+// Dashboard oscuro moderno con los colores de marca de Chaparrita como acentos.
+// Todas las páginas del panel usan este mismo bloque de estilos como base.
+const ADMIN_BASE_CSS = `
+  :root {
+    --coral: #E8674A;
+    --turquesa: #2F9C95;
+    --ocre: #E0A324;
+    --jalapeno: #A93B3B;
+    --bg: #0B0D12;
+    --bg-elevado: #12151D;
+    --card: #171B25;
+    --card-hover: #1D222E;
+    --borde: #262B38;
+    --texto: #EDEFF3;
+    --texto-tenue: #8B93A7;
+    --exito: #3FCB8C;
+    --alerta: #E0A324;
+    --peligro: #E8674A;
+    --radio: 14px;
+    --radio-chico: 9px;
+    --sombra: 0 10px 30px -12px rgba(0,0,0,0.55);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    background: radial-gradient(1200px 600px at 15% -10%, rgba(232,103,74,0.10), transparent 55%),
+                radial-gradient(1000px 500px at 100% 0%, rgba(47,156,149,0.10), transparent 50%),
+                var(--bg);
+    color: var(--texto);
+    margin: 0;
+    min-height: 100vh;
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2A3040; border-radius: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .contenedor { max-width: 720px; margin: 0 auto; padding: 22px 18px 60px; }
+  .contenedor-ancho { max-width: 960px; margin: 0 auto; padding: 22px 18px 60px; }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 22px;
+  }
+  .marca { display: flex; align-items: center; gap: 10px; }
+  .marca .icono {
+    width: 38px; height: 38px; border-radius: 11px;
+    background: linear-gradient(135deg, var(--jalapeno), var(--coral));
+    display: flex; align-items: center; justify-content: center; font-size: 19px;
+    box-shadow: var(--sombra);
+  }
+  .marca b { font-size: 16px; letter-spacing: 0.2px; }
+  .marca span { display: block; font-size: 11px; color: var(--texto-tenue); }
+
+  a.volver {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--texto-tenue); text-decoration: none; font-size: 13px;
+    padding: 7px 12px; border-radius: 20px; border: 1px solid var(--borde);
+    background: var(--bg-elevado); transition: all .15s ease;
+  }
+  a.volver:hover { color: var(--texto); border-color: var(--turquesa); }
+
+  h1 { font-size: 21px; margin: 4px 0 4px; letter-spacing: -0.2px; }
+  h2 { font-size: 14px; color: var(--coral); text-transform: uppercase; letter-spacing: 0.6px; margin-top: 30px; margin-bottom: 10px; border-bottom: 1px solid var(--borde); padding-bottom: 8px; font-weight: 700; }
+  p.sub { color: var(--texto-tenue); font-size: 13px; line-height: 1.5; margin-top: 2px; }
+
+  .tile-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 18px; }
+  a.tile {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 16px; border-radius: var(--radio);
+    background: var(--card); border: 1px solid var(--borde);
+    text-decoration: none; color: var(--texto);
+    transition: all .18s ease; position: relative; overflow: hidden;
+  }
+  a.tile::before {
+    content: ""; position: absolute; inset: 0; opacity: 0; transition: opacity .18s ease;
+    background: linear-gradient(135deg, rgba(232,103,74,0.08), rgba(47,156,149,0.08));
+  }
+  a.tile:hover { border-color: var(--turquesa); transform: translateY(-1px); box-shadow: var(--sombra); }
+  a.tile:hover::before { opacity: 1; }
+  a.tile .tile-icono {
+    width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
+    background: var(--bg-elevado); display: flex; align-items: center; justify-content: center;
+    font-size: 20px; border: 1px solid var(--borde); z-index: 1;
+  }
+  a.tile .tile-texto { z-index: 1; }
+  a.tile b { display: block; color: var(--texto); font-size: 14.5px; margin-bottom: 3px; }
+  a.tile .tile-desc { font-size: 12.5px; color: var(--texto-tenue); line-height: 1.4; }
+
+  .card { background: var(--card); border: 1px solid var(--borde); border-radius: var(--radio); padding: 16px; margin-top: 12px; }
+  .row { display: flex; gap: 10px; } .row > * { flex: 1; }
+
+  label { font-weight: 600; font-size: 12px; display: block; margin-top: 12px; color: var(--texto-tenue); text-transform: uppercase; letter-spacing: 0.3px; }
+  input[type=text], input[type=number], input[type=password], input[type=file], textarea, select {
+    font-size: 14px; padding: 10px 12px; width: 100%; box-sizing: border-box; margin-top: 5px;
+    border: 1px solid var(--borde); border-radius: var(--radio-chico);
+    background: var(--bg-elevado); color: var(--texto); outline: none; transition: border-color .15s ease;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--turquesa); }
+  textarea { min-height: 64px; font-family: inherit; }
+
+  button { font-family: inherit; font-size: 13.5px; padding: 10px 16px; border: none; border-radius: var(--radio-chico); cursor: pointer; margin-top: 10px; font-weight: 600; transition: all .15s ease; }
+  .btn-primary { background: linear-gradient(135deg, var(--jalapeno), var(--coral)); color: #fff; box-shadow: 0 6px 18px -6px rgba(232,103,74,0.5); }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-secondary { background: var(--bg-elevado); color: var(--texto); border: 1px solid var(--borde); }
+  .btn-secondary:hover { border-color: var(--turquesa); }
+  .btn-danger { background: transparent; color: var(--coral); padding: 5px 9px; margin: 0; border: 1px solid transparent; }
+  .btn-danger:hover { background: rgba(232,103,74,0.1); }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .badge { display: inline-block; border-radius: 20px; padding: 3px 11px; font-size: 11.5px; font-weight: 700; }
+  .badge-alto, .badge-on { background: rgba(63,203,140,0.15); color: var(--exito); }
+  .badge-medio { background: rgba(224,163,36,0.15); color: var(--alerta); }
+  .badge-bajo, .badge-off { background: rgba(232,103,74,0.15); color: var(--peligro); }
+  .badge-pendiente { background: var(--bg-elevado); color: var(--texto-tenue); border: 1px solid var(--borde); }
+
+  #msg { margin-top: 14px; font-weight: 600; font-size: 13.5px; color: var(--texto-tenue); }
+  .msg-ok { color: var(--exito) !important; }
+  .msg-error { color: var(--coral) !important; }
+
+  .tag { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-elevado); border: 1px solid var(--borde); border-radius: 16px; padding: 4px 10px; margin: 4px 6px 0 0; font-size: 13px; }
+
+  .toggle-switch { position: relative; display: inline-block; width: 50px; height: 28px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: var(--borde); border-radius: 28px; transition: .2s; }
+  .toggle-slider::before { content: ""; position: absolute; height: 22px; width: 22px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+  .toggle-switch input:checked + .toggle-slider { background: linear-gradient(135deg, var(--turquesa), var(--exito)); }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(22px); }
+
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--texto-tenue); font-size: 13.5px; }
+  .empty-state .icono { font-size: 32px; margin-bottom: 10px; opacity: 0.6; }
+
+  a.logout { display: inline-flex; align-items: center; gap: 5px; color: var(--texto-tenue); text-decoration: none; font-size: 12.5px; }
+  a.logout:hover { color: var(--coral); }
+`;
+
 const ADMIN_CONFIG_PAGE = [
+
   '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
   '<title>Chaparrita - Editar configuracion</title>',
-  '<style>',
-  'body{font-family:sans-serif;max-width:640px;margin:30px auto;padding:0 16px;color:#2b2118;}',
-  'h1{font-size:20px}h2{font-size:16px;color:#C0392B;margin-top:28px;border-bottom:1px solid #E9DCC7;padding-bottom:6px}',
-  'label{font-weight:bold;font-size:12px;display:block;margin-top:10px}',
-  'input[type=text],input[type=number],input[type=password],textarea{font-size:14px;padding:8px;width:100%;box-sizing:border-box;margin-top:4px;border:1px solid #E9DCC7;border-radius:6px}',
-  'textarea{min-height:60px}',
-  'button{font-size:14px;padding:9px 14px;border:none;border-radius:6px;cursor:pointer;margin-top:8px}',
-  '.btn-primary{background:#C0392B;color:#fff}',
-  '.btn-secondary{background:#F0EBE3;color:#2b2118}',
-  '.btn-danger{background:transparent;color:#C0392B;padding:4px 8px}',
-  '.card{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px}',
-  '.row{display:flex;gap:8px}.row>*{flex:1}',
-  'a.back{color:#C0392B;text-decoration:none;font-size:13px}',
-  '#msg{margin-top:14px;font-weight:bold}',
-  '#gate{margin-top:20px}',
-  '#formArea{display:none}',
-  '.tag{display:inline-flex;align-items:center;gap:6px;background:#F6EEDF;border:1px solid #E9DCC7;border-radius:16px;padding:4px 10px;margin:4px 6px 0 0;font-size:13px}',
-  '</style></head><body>',
-  '<a class="back" href="/admin">&larr; Volver al panel</a>',
-  '<h1>Editar precios, horarios, promos y telefonos</h1>',
+  `<style>${ADMIN_BASE_CSS}
+    .contenedor-config { max-width: 640px; margin: 0 auto; padding: 22px 18px 60px; }
+    #formArea { display: none; }
+  </style>`,
+  '</head><body>',
+  '<div class="contenedor-config">',
+  '<a class="volver" href="/admin">← Volver al panel</a>',
+  '<h1>Editar precios, horarios, promos y teléfonos</h1>',
   '<button class="btn-secondary" id="btnReset">Restaurar valores del repositorio (GitHub)</button>',
-  '<p style="font-size:11px;color:#6b6258;margin-top:4px;">Usalo solo si los cambios que hacés acá no se guardan al reiniciar el servidor. Pisa TODO lo que hayas cambiado en este panel con lo que esté subido en GitHub.</p>',
+  '<p class="sub">Usalo solo si los cambios que hacés acá no se guardan al reiniciar el servidor. Pisa TODO lo que hayas cambiado en este panel con lo que esté subido en GitHub.</p>',
   '<div id="msg">Cargando...</div>',
   '<div id="formArea"></div>',
   '<script>',
@@ -210,15 +370,15 @@ const ADMIN_CONFIG_PAGE = [
   '  fetch("/admin/config-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
   '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
   '    .then(function(data){ cfg = data; renderForm(); document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent=""; })',
-  '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+  '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
   '}',
   'cargarConfig();',
   'document.getElementById("btnReset").addEventListener("click", function() {',
   '  if (!confirm("Esto va a pisar TODO lo que hayas cargado en el panel con lo que esta subido en GitHub ahora mismo. Seguro?")) return;',
   '  fetch("/admin/config-reset-from-repo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
   '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo restaurar"); } return r.json(); })',
-  '    .then(function(data){ cfg = data.config; renderForm(); document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent = "Listo, se restauro desde el repositorio."; document.getElementById("msg").style.color = "#2e7d32"; })',
-  '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+  '    .then(function(data){ cfg = data.config; renderForm(); document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent = "Listo, se restauro desde el repositorio."; document.getElementById("msg").className = "msg-ok"; })',
+  '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; });',
   '});',
   '',
   'function renderForm() {',
@@ -455,15 +615,16 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.avisoCumpleañosDiario = {activo: avisoCumpleActivo.checked, telefono: avisoCumpleTel.value, hora: avisoCumpleHora.value};',
   '    nuevo.promosDia = promosDiaData;',
   '    document.getElementById("msg").textContent = "Guardando...";',
-  '    document.getElementById("msg").style.color = "#2b2118";',
+  '    document.getElementById("msg").className = "";',
   '    fetch("/admin/config-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({config: nuevo})})',
   '      .then(function(r){ if (!r.ok) { throw new Error("No se pudo guardar"); } return r.json(); })',
-  '      .then(function(){ document.getElementById("msg").textContent = "Listo, se guardaron los cambios. El agente ya los usa."; document.getElementById("msg").style.color = "#2e7d32"; window.scrollTo(0,0); })',
-  '      .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+  '      .then(function(){ document.getElementById("msg").textContent = "Listo, se guardaron los cambios. El agente ya los usa."; document.getElementById("msg").className = "msg-ok"; window.scrollTo(0,0); })',
+  '      .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; });',
   '  });',
   '  area.appendChild(btnGuardar);',
   '}',
   '</' + 'script>',
+  '</div>',
   '</body></html>'
 ].join("\n");
 
@@ -553,25 +714,28 @@ app.get("/admin/login", (_req, res) => {
   res.type("html").send([
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Ingresar</title>',
-    '<style>',
-    'body{font-family:sans-serif;max-width:380px;margin:80px auto;padding:0 20px;color:#2b2118;text-align:center;}',
-    'h1{font-size:20px}',
-    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:12px;border:1px solid #E9DCC7;border-radius:6px}',
-    'button{font-size:15px;padding:12px;width:100%;box-sizing:border-box;margin-top:14px;border:none;border-radius:8px;cursor:pointer;background:#C0392B;color:#fff}',
-    '#msg{margin-top:14px;font-weight:bold;color:#C0392B}',
-    '</style></head><body>',
-    '<h1>🌮 Panel de Chaparrita</h1>',
-    '<p style="font-size:13px;color:#6b6258">Ingresá la contraseña de administrador una vez, y no te la vuelve a pedir por unas horas.</p>',
+    `<style>${ADMIN_BASE_CSS}
+      .login-shell { max-width: 380px; margin: 100px auto; text-align: center; padding: 0 20px; }
+      .login-icono { width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 18px; background: linear-gradient(135deg, var(--jalapeno), var(--coral)); display: flex; align-items: center; justify-content: center; font-size: 30px; box-shadow: var(--sombra); }
+      .login-shell input[type=password] { text-align: center; font-size: 16px; padding: 13px; }
+      .login-shell button { width: 100%; padding: 13px; font-size: 14.5px; }
+    </style>`,
+    '</head><body>',
+    '<div class="login-shell">',
+    '<div class="login-icono">🌮</div>',
+    '<h1>Panel de Chaparrita</h1>',
+    '<p class="sub">Ingresá la contraseña de administrador una vez, y no te la vuelve a pedir por unas horas.</p>',
     '<input type="password" id="password" placeholder="Contraseña" autofocus />',
-    '<button id="btnEntrar">Entrar</button>',
+    '<button class="btn-primary" id="btnEntrar">Entrar</button>',
     '<div id="msg"></div>',
+    '</div>',
     '<script>',
     'function intentarEntrar() {',
     '  var pw = document.getElementById("password").value;',
     '  fetch("/admin/login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
     '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
     '    .then(function(){ window.location.href = "/admin"; })',
-    '    .catch(function(e){ document.getElementById("msg").textContent = e.message; });',
+    '    .catch(function(e){ document.getElementById("msg").textContent = e.message; document.getElementById("msg").className = "msg-error"; });',
     '}',
     'document.getElementById("btnEntrar").addEventListener("click", intentarEntrar);',
     'document.getElementById("password").addEventListener("keydown", function(e){ if (e.key === "Enter") intentarEntrar(); });',
@@ -649,6 +813,58 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // ¿Hay un postulante esperando mandar su CV en este número, y este mensaje es
+    // una imagen o un documento (PDF)? Si es así, lo tratamos como el CV — guardamos
+    // el archivo, lo evaluamos con IA, y confirmamos la recepción. No pasa por Claude
+    // en este turno (evitamos que se procese como comprobante de pago u otra cosa).
+    const postulantes = loadPostulantes();
+    const postulantePendiente = buscarPostulantePendiente(postulantes, from);
+    if (postulantePendiente && (message.type === "image" || message.type === "document")) {
+      try {
+        console.log(`Recibiendo CV de ${postulantePendiente.nombre} (${from}) para el puesto de ${postulantePendiente.puesto}...`);
+        const mediaId = message.type === "image" ? message.image.id : message.document.id;
+        const { base64, mimeType } = await downloadWhatsappMedia(mediaId);
+        const extension = mimeType === "application/pdf" ? "pdf" : mimeType.split("/")[1] || "bin";
+        const nombreArchivo = `${postulantePendiente.id}.${extension}`;
+        fs.writeFileSync(path.join(CVS_DIR, nombreArchivo), Buffer.from(base64, "base64"));
+
+        let textoExtraido = "";
+        if (mimeType === "application/pdf") {
+          try {
+            const parsed = await pdfParse(Buffer.from(base64, "base64"));
+            textoExtraido = parsed.text.trim();
+          } catch (err) {
+            console.error("No se pudo extraer texto del PDF del CV:", err);
+          }
+        }
+
+        const evaluacion = await evaluarCV(
+          postulantePendiente.nombre,
+          postulantePendiente.puesto,
+          textoExtraido,
+          mimeType === "application/pdf" ? null : base64,
+          mimeType === "application/pdf" ? null : mimeType
+        );
+
+        postulantePendiente.cvArchivo = nombreArchivo;
+        postulantePendiente.cvTipo = mimeType;
+        postulantePendiente.evaluacion = evaluacion;
+        postulantePendiente.estado = "evaluado";
+        postulantePendiente.fechaCv = new Date().toISOString();
+        savePostulantes(postulantes);
+
+        const primerNombre = postulantePendiente.nombre ? postulantePendiente.nombre.split(" ")[0] : "";
+        const mensajeConfirmacion = `¡Va que va${primerNombre ? ", " + primerNombre : ""}! Ya recibimos tu CV para el puesto de ${postulantePendiente.puesto}, buena onda 🙌 Lo vamos a tener guardado, y si en el futuro se abre un lugar para eso, nos comunicamos contigo al toque. ¡Que tengas un excelente día, compa!`;
+        await sendWhatsappText(from, mensajeConfirmacion);
+        agregarMensajeInbox(from, "chaparrita", mensajeConfirmacion);
+        console.log(`CV de ${postulantePendiente.nombre} evaluado. Puntaje: ${evaluacion.puntaje}`);
+      } catch (err) {
+        console.error("Error procesando CV recibido:", err);
+        await sendWhatsappText(from, "Uy, tuvimos un problemita técnico recibiendo tu archivo. ¿Me lo podés volver a mandar en un ratito?");
+      }
+      return;
+    }
+
     // Tipos de mensaje que todavía no podemos "entender" (audio, video, sticker, ubicación, documento, etc):
     // respondemos directo, sin pasar por Claude, para garantizar que el cliente SIEMPRE reciba algo.
     if (message.type !== "text" && message.type !== "image") {
@@ -699,7 +915,8 @@ app.post("/webhook", async (req, res) => {
     const { cleanText, reservaConfirmada } = extractReservaMarker(sinDatos);
     const { cleanText: sinEnvio, direccionEnvio } = extractConsultaEnvioMarker(cleanText);
     const { cleanText: sinPedido, pedidoConfirmado } = extractPedidoMarker(sinEnvio);
-    const { cleanText: cleanText2, datosCliente } = extractClienteDatosMarker(sinPedido);
+    const { cleanText: sinDatosCliente, datosCliente } = extractClienteDatosMarker(sinPedido);
+    const { cleanText: cleanText2, datosPostulante } = extractPostulanteDatosMarker(sinDatosCliente);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
@@ -741,6 +958,20 @@ app.post("/webhook", async (req, res) => {
       }
       cliente.ultimaVez = new Date().toISOString();
       saveClientes(clientes);
+    }
+
+    // Si Claude detectó nombre + puesto de alguien buscando trabajo, guardamos (o
+    // actualizamos) el registro de postulante, quedando a la espera de que mande el CV.
+    if (datosPostulante && datosPostulante.nombre && PUESTOS_DISPONIBLES.includes(datosPostulante.puesto)) {
+      let postulante = postulantes.find((p) => soloDigitos(p.telefono) === soloDigitos(from) && p.estado === "esperando_cv");
+      if (!postulante) {
+        postulante = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), telefono: from, estado: "esperando_cv", fecha: new Date().toISOString() };
+        postulantes.push(postulante);
+      }
+      postulante.nombre = datosPostulante.nombre;
+      postulante.puesto = datosPostulante.puesto;
+      savePostulantes(postulantes);
+      console.log(`Postulante registrado, esperando CV: ${postulante.nombre} — puesto: ${postulante.puesto} (${from}).`);
     }
 
     if (datosReserva && datosReserva.fecha && datosReserva.hora) {
@@ -850,6 +1081,73 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy,
     .map((block) => (block.type === "text" ? block.text : ""))
     .filter(Boolean)
     .join("\n");
+}
+
+// ==================== Evaluación automática de CVs ====================
+// Llamada aparte a Claude (no es parte de la charla con el cliente) para puntuar
+// el CV según experiencia, formación y disponibilidad horaria.
+const EVALUACION_CV_SYSTEM_PROMPT = `Sos un evaluador de CVs para un restaurante bar mexicano en Formosa, Argentina llamado Chaparrita. Te paso el nombre del postulante, el puesto al que aplica, y el contenido de su CV (como texto extraído de un PDF, o directamente la imagen del CV). Tu trabajo es evaluarlo con criterio realista de gastronomía/hotelería, considerando:
+
+1) EXPERIENCIA LABORAL: mirá la duración de cada trabajo anterior, no solo la cantidad.
+   - Trabajos de 1 a 2+ años en un mismo lugar indican estabilidad y compromiso — es un punto a favor fuerte.
+   - Varios trabajos de muy poca duración (semanas o pocos meses) en distintos lugares pueden ser señal de un problema de personalidad, disciplina o conflictos laborales — marcalo como una alerta, sin ser injusto (a veces hay explicaciones válidas como changas de temporada, que no son lo mismo).
+   - La experiencia específica en el rubro gastronómico y en tareas similares al puesto al que aplica (mozo, cajero, barman, cocinero, ayudante de cocina, bachero/lavacopas) vale mucho más que experiencia en rubros totalmente distintos.
+
+2) FORMACIÓN / ESTUDIOS: distinguí claramente el nivel real de la formación.
+   - Un curso formal de varios meses o un título terciario/técnico relacionado (por ejemplo curso de bartender de varios meses, escuela de gastronomía, curso de coctelería con carga horaria) vale mucho más que:
+   - Una charla, taller o seminario de un solo día — esto casi no suma como formación real, aunque muestre interés.
+   - Si no hay ninguna formación relacionada, no lo penalices de más si la experiencia laboral es sólida (para varios de estos puestos la experiencia práctica pesa más que el estudio formal).
+
+3) DISPONIBILIDAD HORARIA: si el CV menciona disponibilidad horaria, notalo. Los puestos de restaurante bar suelen necesitar gente disponible de noche y fines de semana — si el postulante aclara que tiene esa disponibilidad, es un punto a favor. Si el CV no menciona nada de disponibilidad, indicalo como "no especificada" sin penalizar.
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown, sin \`\`\`), con esta forma exacta:
+{"puntaje": NUMERO_DEL_1_AL_10, "resumenExperiencia": "2-3 frases sobre la experiencia laboral y su relevancia/estabilidad", "resumenEducacion": "2-3 frases sobre la formación y qué tan relevante es", "disponibilidad": "lo que diga el CV sobre disponibilidad horaria, o 'No especificada' si no dice nada", "comentario": "conclusión breve de 1-2 frases sobre qué tan recomendable es este postulante para el puesto"}`;
+
+async function evaluarCV(nombre, puesto, textoExtraido, imagenBase64, imagenMimeType) {
+  const contenidoUsuario = [];
+  contenidoUsuario.push({
+    type: "text",
+    text: `Nombre del postulante: ${nombre}\nPuesto al que aplica: ${puesto}\n\n${
+      textoExtraido
+        ? `Contenido del CV (extraído de un PDF):\n${textoExtraido.slice(0, 8000)}`
+        : "El CV viene como imagen adjunta, evaluá lo que puedas leer en ella."
+    }`,
+  });
+  if (imagenBase64 && imagenMimeType) {
+    contenidoUsuario.push({ type: "image", source: { type: "base64", media_type: imagenMimeType, data: imagenBase64 } });
+  }
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 800,
+        system: EVALUACION_CV_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: contenidoUsuario }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al evaluar CV:", data);
+      return { puntaje: null, resumenExperiencia: "", resumenEducacion: "", disponibilidad: "", comentario: "No se pudo evaluar automáticamente, revisar el CV a mano." };
+    }
+    const textoRespuesta = (data.content || [])
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim()
+      .replace(/^```json\s*|\s*```$/g, "");
+    return JSON.parse(textoRespuesta);
+  } catch (err) {
+    console.error("Error evaluando CV:", err);
+    return { puntaje: null, resumenExperiencia: "", resumenEducacion: "", disponibilidad: "", comentario: "No se pudo evaluar automáticamente, revisar el CV a mano." };
+  }
 }
 
 // Saca la marca interna [[RESERVA_DATOS: {...json...}]] y devuelve el texto limpio + los datos parseados
@@ -969,23 +1267,27 @@ app.get("/admin", requireAdminPage, (_req, res) => {
     <!DOCTYPE html>
     <html lang="es">
     <head><meta charset="UTF-8"><title>Chaparrita — Panel</title>
-      <style>
-        body { font-family: sans-serif; max-width: 480px; margin: 60px auto; padding: 0 20px; color: #2b2118; }
-        h1 { font-size: 20px; }
-        a.tile { display: block; padding: 18px; margin-top: 14px; border-radius: 10px; background: #F6EEDF; border: 1px solid #E9DCC7; text-decoration: none; color: #2b2118; }
-        a.tile b { display: block; color: #C0392B; font-size: 16px; margin-bottom: 4px; }
-        a.logout { display: inline-block; margin-top: 24px; color: #6b6258; text-decoration: none; font-size: 13px; }
-      </style>
+      <style>${ADMIN_BASE_CSS}</style>
     </head>
     <body>
-      <h1>🌮 Panel de Chaparrita</h1>
-      <a class="tile" href="/admin/switch"><b>🔌 Prender / apagar el asistente</b>Pausalo cuando un operador quiera atender en persona.</a>
-      <a class="tile" href="/admin/inbox"><b>💬 Atender manualmente</b>Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</a>
-      <a class="tile" href="/admin/clientes"><b>👥 Clientes conocidos</b>Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</a>
-      <a class="tile" href="/admin/inactivos"><b>📉 Clientes inactivos</b>Detecta clientes que dejaron de pedir y te avisa por WhatsApp.</a>
-      <a class="tile" href="/admin/menu"><b>📋 Actualizar el menú</b>Subir un PDF nuevo con precios y productos.</a>
-      <a class="tile" href="/admin/config"><b>⚙️ Precios, horarios, promos y teléfonos</b>Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</a>
-      <a class="logout" href="/admin/logout">Cerrar sesión</a>
+      <div class="contenedor">
+        <div class="topbar">
+          <div class="marca">
+            <div class="icono">🌮</div>
+            <div><b>Chaparrita</b><span>Panel de administración</span></div>
+          </div>
+          <a class="logout" href="/admin/logout">Cerrar sesión ⏻</a>
+        </div>
+        <div class="tile-grid">
+          <a class="tile" href="/admin/switch"><div class="tile-icono">🔌</div><div class="tile-texto"><b>Prender / apagar el asistente</b><div class="tile-desc">Pausalo cuando un operador quiera atender en persona.</div></div></a>
+          <a class="tile" href="/admin/inbox"><div class="tile-icono">💬</div><div class="tile-texto"><b>Atender manualmente</b><div class="tile-desc">Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</div></div></a>
+          <a class="tile" href="/admin/clientes"><div class="tile-icono">👥</div><div class="tile-texto"><b>Clientes conocidos</b><div class="tile-desc">Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</div></div></a>
+          <a class="tile" href="/admin/postulantes"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Postulantes / CVs</b><div class="tile-desc">Gente que dejó su CV, con puntaje automático según experiencia, formación y disponibilidad.</div></div></a>
+          <a class="tile" href="/admin/inactivos"><div class="tile-icono">📉</div><div class="tile-texto"><b>Clientes inactivos</b><div class="tile-desc">Detecta clientes que dejaron de pedir y te avisa por WhatsApp.</div></div></a>
+          <a class="tile" href="/admin/menu"><div class="tile-icono">📋</div><div class="tile-texto"><b>Actualizar el menú</b><div class="tile-desc">Subir un PDF nuevo con precios y productos.</div></div></a>
+          <a class="tile" href="/admin/config"><div class="tile-icono">⚙️</div><div class="tile-texto"><b>Precios, horarios, promos y teléfonos</b><div class="tile-desc">Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</div></div></a>
+        </div>
+      </div>
     </body>
     </html>
   `);
@@ -996,24 +1298,27 @@ app.get("/admin/menu", requireAdminPage, (_req, res) => {
     <!DOCTYPE html>
     <html lang="es">
     <head><meta charset="UTF-8"><title>Chaparrita — Actualizar menú</title>
-      <style>
-        body { font-family: sans-serif; max-width: 480px; margin: 60px auto; padding: 0 20px; color: #2b2118; }
-        h1 { font-size: 20px; }
-        input, button { font-size: 15px; padding: 10px; width: 100%; box-sizing: border-box; margin-top: 8px; }
-        button { background: #C0392B; color: white; border: none; border-radius: 6px; margin-top: 16px; cursor: pointer; }
-        label { font-weight: bold; font-size: 13px; }
-        a.back { display: inline-block; margin-bottom: 16px; color: #C0392B; text-decoration: none; font-size: 13px; }
+      <style>${ADMIN_BASE_CSS}
+        .dropzone { border: 2px dashed var(--borde); border-radius: var(--radio); padding: 30px 16px; text-align: center; margin-top: 14px; transition: border-color .15s ease; }
+        .dropzone:hover { border-color: var(--turquesa); }
+        .dropzone .icono { font-size: 30px; margin-bottom: 8px; }
+        .dropzone input[type=file] { margin-top: 12px; }
       </style>
     </head>
     <body>
-      <a class="back" href="/admin">&larr; Volver al panel</a>
-      <h1>🌮 Actualizar menú de Chaparrita</h1>
-      <p>Subí el PDF del menú nuevo. El agente lo va a usar en la próxima conversación, sin necesidad de tocar código.</p>
-      <form action="/admin/upload-menu" method="POST" enctype="multipart/form-data">
-        <label>Archivo PDF del menú</label>
-        <input type="file" name="menuPdf" accept="application/pdf" required />
-        <button type="submit">Subir y actualizar menú</button>
-      </form>
+      <div class="contenedor">
+        <a class="volver" href="/admin">← Volver al panel</a>
+        <h1>🌮 Actualizar menú de Chaparrita</h1>
+        <p class="sub">Subí el PDF del menú nuevo. El agente lo va a usar en la próxima conversación, sin necesidad de tocar código.</p>
+        <form action="/admin/upload-menu" method="POST" enctype="multipart/form-data">
+          <div class="dropzone">
+            <div class="icono">📄</div>
+            <label style="margin-top:0">Archivo PDF del menú</label>
+            <input type="file" name="menuPdf" accept="application/pdf" required />
+          </div>
+          <button class="btn-primary" type="submit" style="width:100%">Subir y actualizar menú</button>
+        </form>
+      </div>
     </body>
     </html>
   `);
@@ -1035,11 +1340,13 @@ app.post("/admin/upload-menu", requireAdminApi, upload.single("menuPdf"), async 
     console.log(`Menú actualizado desde /admin (${text.length} caracteres).`);
 
     res.type("html").send(`
-      <!DOCTYPE html><html lang="es"><body style="font-family:sans-serif;max-width:480px;margin:60px auto;padding:0 20px;">
-      <h2>✅ Menú actualizado</h2>
-      <p>Se guardaron ${text.length} caracteres de texto extraído del PDF. El agente ya lo va a usar desde el próximo mensaje.</p>
-      <p><a href="/admin/menu">Volver a subir otro</a> · <a href="/admin">Volver al panel</a></p>
-      </body></html>
+      <!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><style>${ADMIN_BASE_CSS}</style></head>
+      <body><div class="contenedor" style="text-align:center;padding-top:60px;">
+      <div style="font-size:44px;margin-bottom:10px;">✅</div>
+      <h1>Menú actualizado</h1>
+      <p class="sub">Se guardaron ${text.length} caracteres de texto extraído del PDF. El agente ya lo va a usar desde el próximo mensaje.</p>
+      <p style="margin-top:20px;"><a class="volver" href="/admin/menu" style="display:inline-flex;margin-right:8px;">Volver a subir otro</a> <a class="volver" href="/admin" style="display:inline-flex;">Volver al panel</a></p>
+      </div></body></html>
     `);
   } catch (err) {
     console.error("Error al procesar el PDF del menú:", err);
@@ -1052,28 +1359,25 @@ app.get("/admin/clientes", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Clientes</title>',
-    '<style>',
-    'body{font-family:sans-serif;max-width:700px;margin:30px auto;padding:0 16px;color:#2b2118;}',
-    'h1{font-size:20px}',
-    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
-    'button{font-size:15px;padding:10px 16px;border:none;border-radius:6px;cursor:pointer;margin-top:10px;background:#C0392B;color:#fff}',
-    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;margin-bottom:10px}',
-    '.card{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px}',
-    '.nombre{font-weight:bold;font-size:15px}',
-    '.tel{font-size:12px;color:#6b6258}',
-    '.detalle{font-size:13px;margin-top:6px}',
-    '.cumple{display:inline-block;background:#FCE4EC;color:#C0392B;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:bold;margin-left:6px}',
-    '#msg{margin-top:14px;font-weight:bold}',
-    '#buscador{margin-top:16px}',
-    '</style></head><body>',
-    '<a class="back" href="/admin">&larr; Volver al panel</a>',
+    `<style>${ADMIN_BASE_CSS}
+      .filtros-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+      .filtros-row button { margin-top: 0; }
+      .filtros-row button.activo { background: linear-gradient(135deg, var(--jalapeno), var(--coral)); color: #fff; }
+      .cliente-nombre { font-weight: 700; font-size: 15px; }
+      .cliente-tel { font-size: 12px; color: var(--texto-tenue); margin-top: 2px; }
+      .cliente-detalle { font-size: 12.5px; margin-top: 8px; color: var(--texto-tenue); line-height: 1.5; }
+      .cumple-badge { display: inline-block; background: rgba(232,103,74,0.15); color: var(--coral); border-radius: 12px; padding: 2px 9px; font-size: 11px; font-weight: 700; margin-left: 8px; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
     '<h1>👥 Clientes conocidos</h1>',
     '<div id="msg">Cargando...</div>',
-    '<div id="filtros" style="display:none;margin-top:10px;">',
-    '  <button id="btnOrdenVisita" class="btn-toggle" style="background:#F0EBE3;color:#2b2118;padding:8px 12px;font-size:13px;">Por última visita</button>',
-    '  <button id="btnOrdenCumple" class="btn-toggle" style="background:#F0EBE3;color:#2b2118;padding:8px 12px;font-size:13px;">🎂 Próximos cumpleaños</button>',
+    '<div class="filtros-row" id="filtros" style="display:none;">',
+    '  <button id="btnOrdenVisita" class="btn-secondary activo">Por última visita</button>',
+    '  <button id="btnOrdenCumple" class="btn-secondary">🎂 Próximos cumpleaños</button>',
     '</div>',
-    '<input type="text" id="buscador" placeholder="Buscar por nombre o teléfono..." style="display:none;font-size:14px;padding:8px;width:100%;box-sizing:border-box;border:1px solid #E9DCC7;border-radius:6px;margin-top:8px;" />',
+    '<input type="text" id="buscador" placeholder="Buscar por nombre o teléfono..." style="display:none;margin-top:10px;" />',
     '<div id="lista"></div>',
     '<script>',
     'var todos = [];',
@@ -1093,16 +1397,16 @@ app.get("/admin/clientes", requireAdminPage, (_req, res) => {
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){',
     '      todos = data;',
-    '      document.getElementById("filtros").style.display = "block";',
+    '      document.getElementById("filtros").style.display = "flex";',
     '      document.getElementById("buscador").style.display = "block";',
     '      document.getElementById("msg").textContent = todos.length + " clientes guardados.";',
     '      pintar(todos);',
     '    })',
-    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
     '}',
     'cargar();',
-    'document.getElementById("btnOrdenVisita").addEventListener("click", function(){ modoOrden = "visita"; pintar(todos); });',
-    'document.getElementById("btnOrdenCumple").addEventListener("click", function(){ modoOrden = "cumple"; pintar(todos); });',
+    'document.getElementById("btnOrdenVisita").addEventListener("click", function(){ modoOrden = "visita"; this.className="btn-secondary activo"; document.getElementById("btnOrdenCumple").className="btn-secondary"; pintar(todos); });',
+    'document.getElementById("btnOrdenCumple").addEventListener("click", function(){ modoOrden = "cumple"; this.className="btn-secondary activo"; document.getElementById("btnOrdenVisita").className="btn-secondary"; pintar(todos); });',
     'document.getElementById("buscador").addEventListener("input", function() {',
     '  var q = this.value.toLowerCase();',
     '  var filtrados = todos.filter(function(c) { return (c.nombre||"").toLowerCase().indexOf(q) !== -1 || (c.telefono||"").indexOf(q) !== -1; });',
@@ -1127,16 +1431,17 @@ app.get("/admin/clientes", requireAdminPage, (_req, res) => {
     '    if (c.cumpleanos) {',
     '      var dias = c._dias != null ? c._dias : diasHastaCumple(c.cumpleanos);',
     '      var txt = dias === 0 ? "¡ES HOY!" : ("en " + dias + " días");',
-    '      etiquetaCumple = "<span class=\\"cumple\\">🎂 " + c.cumpleanos + " (" + txt + ")</span>";',
+    '      etiquetaCumple = "<span class=\\"cumple-badge\\">🎂 " + c.cumpleanos + " (" + txt + ")</span>";',
     '    }',
-    '    div.innerHTML = "<span class=\\"nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" + etiquetaCumple +',
-    '      "<div class=\\"tel\\">+" + c.telefono + "</div>" +',
-    '      "<div class=\\"detalle\\">Pedidos: " + (c.cantidadPedidos||0) + " · Últimos: " + pedidos + "</div>";',
+    '    div.innerHTML = "<span class=\\"cliente-nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" + etiquetaCumple +',
+    '      "<div class=\\"cliente-tel\\">+" + c.telefono + "</div>" +',
+    '      "<div class=\\"cliente-detalle\\">Pedidos: " + (c.cantidadPedidos||0) + " · Últimos: " + pedidos + "</div>";',
     '    cont.appendChild(div);',
     '  });',
-    '  if (ordenados.length === 0) { cont.innerHTML = "<p>No hay clientes que coincidan.</p>"; }',
+    '  if (ordenados.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">👥</div>No hay clientes que coincidan.</div>"; }',
     '}',
     '</' + 'script>',
+    '</div>',
     '</body></html>'
   ].join("\n");
   res.type("html").send(html);
@@ -1146,113 +1451,310 @@ app.post("/admin/clientes-data", requireAdminApi, (req, res) => {
   res.json(loadClientes());
 });
 
+// ==================== Postulantes / CVs ====================
+app.get("/admin/postulantes", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Postulantes</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .postulante-nombre { font-weight: 700; font-size: 15px; }
+      .postulante-puesto { font-size: 12px; color: var(--turquesa); text-transform: capitalize; font-weight: 600; margin-top: 2px; }
+      .postulante-tel { font-size: 12px; color: var(--texto-tenue); margin-top: 2px; }
+      .postulante-detalle { font-size: 12.5px; margin-top: 8px; line-height: 1.55; color: var(--texto-tenue); }
+      .postulante-detalle b { color: var(--coral); }
+      .acciones { margin-top: 12px; display: flex; gap: 8px; }
+      .acciones a { font-size: 12px; color: var(--turquesa); text-decoration: none; border: 1px solid var(--turquesa); border-radius: 8px; padding: 6px 11px; }
+      .acciones a:hover { background: rgba(47,156,149,0.12); }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>🧾 Postulantes / CVs</h1>',
+    '<select id="filtroPuesto">',
+    '  <option value="">Todos los puestos</option>',
+    '  <option value="mozo">Mozo</option>',
+    '  <option value="cajero">Cajero</option>',
+    '  <option value="barman">Barman</option>',
+    '  <option value="cocinero">Cocinero</option>',
+    '  <option value="ayudante de cocina">Ayudante de cocina</option>',
+    '  <option value="bachero">Bachero / Lavacopas</option>',
+    '</select>',
+    '<div id="msg">Cargando...</div>',
+    '<div id="lista"></div>',
+    '<script>',
+    'var todos = [];',
+    'function cargar() {',
+    '  fetch("/admin/postulantes-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      todos = data.postulantes;',
+    '      document.getElementById("msg").textContent = todos.length + " postulantes guardados.";',
+    '      pintar();',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
+    '}',
+    'cargar();',
+    'document.getElementById("filtroPuesto").addEventListener("change", pintar);',
+    'function badgeClase(puntaje) {',
+    '  if (puntaje == null) return "badge-pendiente";',
+    '  if (puntaje >= 7) return "badge-alto";',
+    '  if (puntaje >= 4) return "badge-medio";',
+    '  return "badge-bajo";',
+    '}',
+    'function pintar() {',
+    '  var cont = document.getElementById("lista");',
+    '  cont.innerHTML = "";',
+    '  var filtro = document.getElementById("filtroPuesto").value;',
+    '  var lista = todos.slice().sort(function(a,b){ return new Date(b.fecha) - new Date(a.fecha); });',
+    '  if (filtro) lista = lista.filter(function(p){ return p.puesto === filtro; });',
+    '  if (lista.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🧾</div>No hay postulantes que coincidan.</div>"; return; }',
+    '  lista.forEach(function(p) {',
+    '    var div = document.createElement("div");',
+    '    div.className = "card";',
+    '    var ev = p.evaluacion || {};',
+    '    var badge = p.estado === "evaluado"',
+    '      ? "<span class=\\"badge " + badgeClase(ev.puntaje) + "\\">" + (ev.puntaje != null ? ev.puntaje + "/10" : "Sin evaluar") + "</span>"',
+    '      : "<span class=\\"badge badge-pendiente\\">Esperando CV</span>";',
+    '    var detalle = p.estado === "evaluado"',
+    '      ? "<div class=\\"postulante-detalle\\"><b>Experiencia:</b> " + (ev.resumenExperiencia || "-") + "</div>" +',
+    '        "<div class=\\"postulante-detalle\\"><b>Formación:</b> " + (ev.resumenEducacion || "-") + "</div>" +',
+    '        "<div class=\\"postulante-detalle\\"><b>Disponibilidad:</b> " + (ev.disponibilidad || "-") + "</div>" +',
+    '        "<div class=\\"postulante-detalle\\"><b>Conclusión:</b> " + (ev.comentario || "-") + "</div>"',
+    '      : "<div class=\\"postulante-detalle\\">Todavía no mandó el CV.</div>";',
+    '    var acciones = "<div class=\\"acciones\\">" +',
+    '      (p.cvArchivo ? "<a href=\\"/admin/postulantes/cv/" + p.id + "\\" target=\\"_blank\\">Ver CV</a>" : "") +',
+    '      "<a href=\\"/admin/inbox?tel=" + p.telefono + "\\">Ir al chat</a>" +',
+    '      "</div>";',
+    '    div.innerHTML = "<span class=\\"postulante-nombre\\">" + (p.nombre || "(sin nombre)") + "</span>" + badge +',
+    '      "<div class=\\"postulante-puesto\\">" + (p.puesto || "") + "</div>" +',
+    '      "<div class=\\"postulante-tel\\">+" + p.telefono + " · " + new Date(p.fecha).toLocaleDateString("es-AR") + "</div>" +',
+    '      detalle + acciones;',
+    '    cont.appendChild(div);',
+    '  });',
+    '}',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/postulantes-data", requireAdminApi, (_req, res) => {
+  res.json({ postulantes: loadPostulantes() });
+});
+
+app.get("/admin/postulantes/cv/:id", requireAdminPage, (req, res) => {
+  const postulantes = loadPostulantes();
+  const postulante = postulantes.find((p) => p.id === req.params.id);
+  if (!postulante || !postulante.cvArchivo) {
+    return res.status(404).send("CV no encontrado.");
+  }
+  const filePath = path.join(CVS_DIR, postulante.cvArchivo);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send("El archivo del CV ya no está disponible.");
+  }
+  res.sendFile(filePath);
+});
+
 // ==================== Bandeja de entrada manual (atender sin usar el celular) ====================
 app.get("/admin/inbox", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Atender manualmente</title>',
-    '<style>',
-    'body{font-family:sans-serif;max-width:760px;margin:20px auto;padding:0 16px;color:#2b2118;}',
-    'h1{font-size:20px}',
-    'input[type=password],input[type=text]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
-    'button{font-size:15px;padding:10px 16px;border:none;border-radius:6px;cursor:pointer;margin-top:10px;background:#C0392B;color:#fff}',
-    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;margin-bottom:10px}',
-    '.chatCard{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px;cursor:pointer}',
-    '.chatCard:hover{background:#F0E6D2}',
-    '.nombre{font-weight:bold;font-size:15px}',
-    '.tel{font-size:12px;color:#6b6258}',
-    '.ultimo{font-size:13px;margin-top:6px;color:#2b2118;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.badge{display:inline-block;background:#C0392B;color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;margin-left:8px}',
-    '#msg{margin-top:14px;font-weight:bold}',
-    '#listaChats{display:block}',
-    '#vistaChat{display:none}',
-    '.burbuja{max-width:80%;padding:8px 12px;border-radius:12px;margin-top:8px;font-size:14px;white-space:pre-wrap}',
-    '.cliente{background:#F0EBE3;margin-right:auto}',
-    '.chaparrita{background:#DCF3D6;margin-left:auto;text-align:left}',
-    '.humano{background:#D6E8F3;margin-left:auto;text-align:left}',
-    '.hora{font-size:10px;color:#6b6258;margin-top:2px}',
-    '#mensajes{display:flex;flex-direction:column;max-height:60vh;overflow-y:auto;padding:8px;background:#fff;border:1px solid #E9DCC7;border-radius:8px;margin-top:10px}',
-    '.toggleRow{display:flex;align-items:center;gap:8px;margin-top:10px}',
-    '.toggleRow label{font-size:13px;font-weight:normal}',
-    '.enviarRow{display:flex;gap:8px;margin-top:10px}',
-    '.enviarRow input{margin-top:0}',
-    '.enviarRow button{margin-top:0;white-space:nowrap}',
-    '</style></head><body>',
-    '<a class="back" href="/admin">&larr; Volver al panel</a>',
-    '<h1>💬 Atender manualmente</h1>',
-    '<div id="msg">Cargando...</div>',
-    '<div id="listaChats"></div>',
-    '<div id="vistaChat">',
-    '  <a class="back" href="#" id="btnVolverLista">&larr; Volver a la lista</a>',
-    '  <div id="nombreChatActivo" style="font-weight:bold;font-size:16px;"></div>',
-    '  <div class="toggleRow">',
-    '    <input type="checkbox" id="chkManual" />',
-    '    <label for="chkManual">Modo manual activo (el bot no responde en este chat)</label>',
+    `<style>${ADMIN_BASE_CSS}
+      body { overflow: hidden; }
+      .wa-shell { display: flex; height: 100vh; max-width: 1180px; margin: 0 auto; background: var(--bg-elevado); }
+
+      /* ---- Barra lateral (lista de chats) ---- */
+      .wa-sidebar { width: 100%; max-width: 360px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid var(--borde); background: var(--card); }
+      .wa-sidebar-header { padding: 14px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--borde); flex-shrink: 0; }
+      .wa-sidebar-header a.volver { padding: 6px 10px; font-size: 12px; }
+      .wa-buscador-wrap { padding: 10px 12px; flex-shrink: 0; }
+      .wa-buscador-wrap input { margin-top: 0; border-radius: 20px; padding: 9px 14px; font-size: 13px; }
+      .wa-lista-chats { flex: 1; overflow-y: auto; }
+
+      .wa-avatar { width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 17px; font-weight: 700; color: #fff; }
+
+      .wa-chat-item { display: flex; gap: 12px; align-items: center; padding: 11px 14px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.03); transition: background .12s ease; }
+      .wa-chat-item:hover { background: var(--card-hover); }
+      .wa-chat-item.activo { background: var(--card-hover); border-left: 3px solid var(--turquesa); padding-left: 11px; }
+      .wa-chat-info { flex: 1; min-width: 0; }
+      .wa-chat-top-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+      .wa-chat-nombre { font-weight: 600; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .wa-chat-hora { font-size: 11px; color: var(--texto-tenue); flex-shrink: 0; }
+      .wa-chat-preview-row { display: flex; justify-content: space-between; align-items: center; margin-top: 3px; gap: 6px; }
+      .wa-chat-preview { font-size: 12.5px; color: var(--texto-tenue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .wa-manual-pill { background: rgba(224,163,36,0.18); color: var(--ocre); font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; flex-shrink: 0; }
+
+      /* ---- Panel de conversación ---- */
+      .wa-main { flex: 1; display: flex; flex-direction: column; min-width: 0; background:
+          radial-gradient(circle at 8px 8px, rgba(255,255,255,0.025) 1.4px, transparent 1.6px);
+          background-size: 26px 26px; background-color: var(--bg); }
+      .wa-main-header { display: flex; align-items: center; gap: 12px; padding: 11px 18px; background: var(--card); border-bottom: 1px solid var(--borde); flex-shrink: 0; }
+      .wa-main-header .wa-btn-volver-movil { display: none; background: none; border: none; color: var(--texto); font-size: 18px; cursor: pointer; margin: 0; padding: 0; }
+      .wa-main-header-info b { display: block; font-size: 14.5px; }
+      .wa-main-header-info span { font-size: 11.5px; color: var(--texto-tenue); }
+      .wa-toggle-manual { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+      .wa-toggle-manual span { font-size: 11.5px; color: var(--texto-tenue); text-align: right; max-width: 110px; line-height: 1.3; }
+
+      .wa-mensajes { flex: 1; overflow-y: auto; padding: 18px 24px; display: flex; flex-direction: column; gap: 3px; }
+      .wa-fila { display: flex; }
+      .wa-fila.entrante { justify-content: flex-start; }
+      .wa-fila.saliente { justify-content: flex-end; }
+      .wa-burbuja { max-width: 62%; padding: 7px 10px 6px; border-radius: 9px; font-size: 13.8px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; box-shadow: 0 1px 1.5px rgba(0,0,0,0.25); position: relative; }
+      .wa-fila.entrante .wa-burbuja { background: #232834; color: var(--texto); border-top-left-radius: 2px; }
+      .wa-fila.saliente .wa-burbuja { background: #1F4D3D; color: #E7F5EC; border-top-right-radius: 2px; }
+      .wa-meta { display: flex; align-items: center; gap: 4px; justify-content: flex-end; margin-top: 3px; font-size: 10.5px; color: rgba(255,255,255,0.45); }
+      .wa-fila.entrante .wa-meta { color: var(--texto-tenue); }
+      .wa-check { color: #6FC3F7; font-size: 12px; }
+      .wa-autor { font-size: 10px; opacity: 0.7; }
+
+      .wa-compose { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: var(--card); border-top: 1px solid var(--borde); flex-shrink: 0; }
+      .wa-compose input { margin-top: 0; border-radius: 22px; padding: 11px 16px; font-size: 13.8px; }
+      .wa-btn-enviar { width: 42px; height: 42px; border-radius: 50%; border: none; background: linear-gradient(135deg, var(--jalapeno), var(--coral)); color: #fff; font-size: 16px; cursor: pointer; margin: 0; flex-shrink: 0; }
+
+      .wa-estado-vacio { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--texto-tenue); text-align: center; padding: 20px; }
+      .wa-estado-vacio .icono { font-size: 46px; margin-bottom: 14px; opacity: 0.5; }
+      .wa-estado-vacio b { color: var(--texto); font-size: 15px; display: block; margin-bottom: 4px; }
+
+      @media (max-width: 860px) {
+        .wa-shell { display: block; height: 100vh; }
+        .wa-sidebar { max-width: none; height: 100vh; }
+        .wa-sidebar.wa-oculta-movil { display: none; }
+        .wa-main { display: none; position: fixed; inset: 0; z-index: 5; }
+        .wa-main.wa-main-visible { display: flex; }
+        .wa-main-header .wa-btn-volver-movil { display: block; }
+      }
+    </style>`,
+    '</head><body>',
+    '<div class="wa-shell">',
+    '  <div class="wa-sidebar" id="listaChats">',
+    '    <div class="wa-sidebar-header">',
+    '      <a class="volver" href="/admin">←</a>',
+    '      <b>💬 Atender manualmente</b>',
+    '    </div>',
+    '    <div class="wa-buscador-wrap"><input type="text" id="buscadorChats" placeholder="Buscar conversación..." /></div>',
+    '    <div id="msg" style="padding:0 16px;">Cargando...</div>',
+    '    <div class="wa-lista-chats" id="listaChatsCont"></div>',
     '  </div>',
-    '  <div id="mensajes"></div>',
-    '  <div class="enviarRow">',
-    '    <input type="text" id="textoAEnviar" placeholder="Escribí tu mensaje..." />',
-    '    <button id="btnEnviar">Enviar</button>',
+    '  <div class="wa-main" id="vistaChat">',
+    '    <div class="wa-estado-vacio" id="estadoVacioChat">',
+    '      <div class="icono">💬</div>',
+    '      <b>Elegí una conversación</b>',
+    '      Los mensajes que mandes acá salen directo por WhatsApp, como si los mandara Chaparrita.',
+    '    </div>',
+    '    <div id="chatAbierto" style="display:none;flex:1;display:flex;flex-direction:column;min-height:0;">',
+    '      <div class="wa-main-header">',
+    '        <button class="wa-btn-volver-movil" id="btnVolverLista">←</button>',
+    '        <div class="wa-avatar" id="avatarChatActivo">?</div>',
+    '        <div class="wa-main-header-info"><b id="nombreChatActivo">-</b><span id="telChatActivo"></span></div>',
+    '        <div class="wa-toggle-manual">',
+    '          <span>Modo manual<br/>(el bot no responde)</span>',
+    '          <label class="toggle-switch"><input type="checkbox" id="chkManual" /><span class="toggle-slider"></span></label>',
+    '        </div>',
+    '      </div>',
+    '      <div class="wa-mensajes" id="mensajes"></div>',
+    '      <div class="wa-compose">',
+    '        <input type="text" id="textoAEnviar" placeholder="Escribí un mensaje..." />',
+    '        <button class="wa-btn-enviar" id="btnEnviar">➤</button>',
+    '      </div>',
+    '    </div>',
     '  </div>',
     '</div>',
     '<script>',
     'var telefonoActivo = null;',
+    'var todosLosChats = [];',
+    'var COLORES_AVATAR = ["#E8674A","#2F9C95","#E0A324","#A93B3B","#6B4FA0","#3B7DA9"];',
+    'function colorAvatar(texto) {',
+    '  var suma = 0; for (var i = 0; i < texto.length; i++) suma += texto.charCodeAt(i);',
+    '  return COLORES_AVATAR[suma % COLORES_AVATAR.length];',
+    '}',
+    'function inicial(nombre, telefono) {',
+    '  var base = (nombre || telefono || "?").trim();',
+    '  return base.charAt(0).toUpperCase();',
+    '}',
     'function cargarLista() {',
     '  fetch("/admin/inbox-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){',
     '      document.getElementById("msg").textContent = "";',
-    '      pintarLista(data.chats);',
+    '      todosLosChats = data.chats;',
+    '      var telParam = new URLSearchParams(window.location.search).get("tel");',
+    '      pintarLista(todosLosChats);',
+    '      if (telParam) { abrirChat(telParam); }',
     '    })',
-    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
     '}',
     'cargarLista();',
+    'document.getElementById("buscadorChats").addEventListener("input", function() {',
+    '  var q = this.value.toLowerCase();',
+    '  var filtrados = todosLosChats.filter(function(c) { return (c.nombre||"").toLowerCase().indexOf(q) !== -1 || (c.telefono||"").indexOf(q) !== -1; });',
+    '  pintarLista(filtrados);',
+    '});',
     'function pintarLista(chats) {',
-    '  var cont = document.getElementById("listaChats");',
-    '  document.getElementById("vistaChat").style.display = "none";',
-    '  cont.style.display = "block";',
+    '  var cont = document.getElementById("listaChatsCont");',
     '  cont.innerHTML = "";',
-    '  chats.sort(function(a,b){ return new Date(b.ultimaActividad) - new Date(a.ultimaActividad); });',
-    '  if (chats.length === 0) { cont.innerHTML = "<p>Todavía no hay conversaciones guardadas.</p>"; return; }',
-    '  chats.forEach(function(c) {',
+    '  var ordenados = chats.slice().sort(function(a,b){ return new Date(b.ultimaActividad) - new Date(a.ultimaActividad); });',
+    '  if (ordenados.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">💬</div>Todavía no hay conversaciones guardadas.</div>"; return; }',
+    '  ordenados.forEach(function(c) {',
     '    var div = document.createElement("div");',
-    '    div.className = "chatCard";',
+    '    div.className = "wa-chat-item" + (c.telefono === telefonoActivo ? " activo" : "");',
     '    var ultimoMsg = c.mensajes.length ? c.mensajes[c.mensajes.length - 1] : null;',
-    '    var badge = c.modoManual ? "<span class=\\"badge\\">MANUAL</span>" : "";',
-    '    div.innerHTML = "<span class=\\"nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" + badge +',
-    '      "<div class=\\"tel\\">+" + c.telefono + "</div>" +',
-    '      "<div class=\\"ultimo\\">" + (ultimoMsg ? ultimoMsg.texto : "") + "</div>";',
+    '    var horaTxt = ultimoMsg ? new Date(ultimoMsg.fecha).toLocaleTimeString("es-AR", {hour:"2-digit", minute:"2-digit"}) : "";',
+    '    var pill = c.modoManual ? "<span class=\\"wa-manual-pill\\">MANUAL</span>" : "";',
+    '    var av = document.createElement("div");',
+    '    av.className = "wa-avatar"; av.style.background = colorAvatar(c.telefono); av.textContent = inicial(c.nombre, c.telefono);',
+    '    var info = document.createElement("div");',
+    '    info.className = "wa-chat-info";',
+    '    info.innerHTML = "<div class=\\"wa-chat-top-row\\"><span class=\\"wa-chat-nombre\\">" + (c.nombre || ("+" + c.telefono)) + "</span><span class=\\"wa-chat-hora\\">" + horaTxt + "</span></div>" +',
+    '      "<div class=\\"wa-chat-preview-row\\"><span class=\\"wa-chat-preview\\">" + (ultimoMsg ? ultimoMsg.texto.replace(/</g,"&lt;") : "") + "</span>" + pill + "</div>";',
+    '    div.appendChild(av); div.appendChild(info);',
     '    div.addEventListener("click", function(){ abrirChat(c.telefono); });',
     '    cont.appendChild(div);',
     '  });',
     '}',
     'function abrirChat(telefono) {',
     '  telefonoActivo = telefono;',
+    '  document.getElementById("vistaChat").classList.add("wa-main-visible");',
+    '  document.getElementById("listaChats").classList.add("wa-oculta-movil");',
     '  fetch("/admin/inbox-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){',
+    '      todosLosChats = data.chats;',
     '      var chat = data.chats.find(function(c){ return c.telefono === telefono; });',
     '      if (!chat) return;',
-    '      document.getElementById("listaChats").style.display = "none";',
-    '      document.getElementById("vistaChat").style.display = "block";',
-    '      document.getElementById("nombreChatActivo").textContent = (chat.nombre || "(sin nombre)") + " · +" + chat.telefono;',
+    '      document.getElementById("estadoVacioChat").style.display = "none";',
+    '      document.getElementById("chatAbierto").style.display = "flex";',
+    '      document.getElementById("nombreChatActivo").textContent = chat.nombre || ("+" + chat.telefono);',
+    '      document.getElementById("telChatActivo").textContent = "+" + chat.telefono;',
+    '      var av = document.getElementById("avatarChatActivo");',
+    '      av.style.background = colorAvatar(chat.telefono); av.textContent = inicial(chat.nombre, chat.telefono);',
     '      document.getElementById("chkManual").checked = !!chat.modoManual;',
     '      pintarMensajes(chat.mensajes);',
+    '      pintarLista(todosLosChats);',
     '    });',
     '}',
     'function pintarMensajes(mensajes) {',
     '  var cont = document.getElementById("mensajes");',
     '  cont.innerHTML = "";',
     '  mensajes.forEach(function(m) {',
-    '    var div = document.createElement("div");',
-    '    div.className = "burbuja " + (m.rol === "cliente" ? "cliente" : (m.rol === "humano" ? "humano" : "chaparrita"));',
-    '    var hora = new Date(m.fecha).toLocaleString("es-AR");',
-    '    div.innerHTML = m.texto.replace(/</g,"&lt;") + "<div class=\\"hora\\">" + hora + (m.rol === "humano" ? " · vos" : (m.rol === "chaparrita" ? " · Chaparrita (bot)" : "")) + "</div>";',
-    '    cont.appendChild(div);',
+    '    var esSaliente = m.rol !== "cliente";',
+    '    var fila = document.createElement("div");',
+    '    fila.className = "wa-fila " + (esSaliente ? "saliente" : "entrante");',
+    '    var hora = new Date(m.fecha).toLocaleTimeString("es-AR", {hour:"2-digit", minute:"2-digit"});',
+    '    var meta = esSaliente',
+    '      ? hora + " <span class=\\"wa-check\\">✓✓</span>" + (m.rol === "humano" ? " <span class=\\"wa-autor\\">· vos</span>" : "")',
+    '      : hora;',
+    '    fila.innerHTML = "<div class=\\"wa-burbuja\\">" + m.texto.replace(/</g,"&lt;") + "<div class=\\"wa-meta\\">" + meta + "</div></div>";',
+    '    cont.appendChild(fila);',
     '  });',
     '  cont.scrollTop = cont.scrollHeight;',
     '}',
-    'document.getElementById("btnVolverLista").addEventListener("click", function(e){ e.preventDefault(); cargarLista(); });',
+    'document.getElementById("btnVolverLista").addEventListener("click", function(){',
+    '  document.getElementById("vistaChat").classList.remove("wa-main-visible");',
+    '  document.getElementById("listaChats").classList.remove("wa-oculta-movil");',
+    '  telefonoActivo = null;',
+    '});',
     'document.getElementById("chkManual").addEventListener("change", function() {',
     '  var activo = this.checked;',
     '  fetch("/admin/inbox-toggle-manual", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telefono: telefonoActivo, modoManual: activo})})',
@@ -1329,62 +1831,45 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Prender o apagar</title>',
-    '<style>',
-    'body{font-family:sans-serif;max-width:420px;margin:60px auto;padding:0 20px;color:#2b2118;text-align:center;}',
-    'h1{font-size:20px}',
-    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
-    'button{font-size:15px;padding:12px;width:100%;box-sizing:border-box;margin-top:16px;border:none;border-radius:8px;cursor:pointer}',
-    '.btn-primary{background:#C0392B;color:#fff}',
-    '#estado{margin-top:26px;display:none}',
-    '.pill{display:inline-block;padding:10px 22px;border-radius:999px;font-weight:bold;font-size:16px;margin-bottom:14px}',
-    '.on{background:#DFF3E0;color:#2e7d32}',
-    '.off{background:#FBE2DF;color:#C0392B}',
-    '.btn-toggle{padding:16px;font-size:16px;font-weight:bold}',
-    '.btn-off{background:#C0392B;color:#fff}',
-    '.btn-on{background:#2e7d32;color:#fff}',
-    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;text-align:left;margin-bottom:10px}',
-    '#msg{margin-top:14px;font-weight:bold}',
-    '</style></head><body>',
-    '<a class="back" href="/admin">&larr; Volver al panel</a>',
+    `<style>${ADMIN_BASE_CSS}
+      .estado-card { display: flex; align-items: center; justify-content: space-between; padding: 22px 20px; }
+      .estado-info b { display: block; font-size: 16px; margin-bottom: 4px; }
+      .estado-info span { font-size: 12.5px; color: var(--texto-tenue); }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
     '<h1>🔌 Prender / apagar el asistente</h1>',
-    '<p style="font-size:13px;color:#6b6258">Mientras está apagado, Chaparrita no responde nada por WhatsApp — queda todo para que lo atienda un operador a mano.</p>',
-    '<div id="estado">',
-    '  <div id="pill" class="pill">...</div>',
-    '  <button id="btnToggle" class="btn-toggle"></button>',
+    '<p class="sub">Mientras está apagado, Chaparrita no responde nada por WhatsApp — queda todo para que lo atienda un operador a mano.</p>',
+    '<div class="card estado-card" id="estado" style="display:none">',
+    '  <div class="estado-info"><b id="estadoTexto">...</b><span>Tocá el switch para cambiar</span></div>',
+    '  <label class="toggle-switch"><input type="checkbox" id="chkToggle" /><span class="toggle-slider"></span></label>',
     '</div>',
     '<div id="msg">Cargando...</div>',
     '<script>',
     'var activo = null;',
     'function pintar() {',
-    '  var pill = document.getElementById("pill");',
-    '  var btn = document.getElementById("btnToggle");',
-    '  if (activo) {',
-    '    pill.textContent = "🟢 Asistente ENCENDIDO";',
-    '    pill.className = "pill on";',
-    '    btn.textContent = "Apagar el asistente";',
-    '    btn.className = "btn-toggle btn-off";',
-    '  } else {',
-    '    pill.textContent = "🔴 Asistente APAGADO";',
-    '    pill.className = "pill off";',
-    '    btn.textContent = "Prender el asistente";',
-    '    btn.className = "btn-toggle btn-on";',
-    '  }',
+    '  var texto = document.getElementById("estadoTexto");',
+    '  var chk = document.getElementById("chkToggle");',
+    '  chk.checked = !!activo;',
+    '  texto.textContent = activo ? "🟢 Asistente ENCENDIDO" : "🔴 Asistente APAGADO";',
     '}',
     'function cargar() {',
     '  fetch("/admin/switch-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
-    '    .then(function(data){ activo = data.activo; pintar(); document.getElementById("estado").style.display = "block"; document.getElementById("msg").textContent = ""; })',
-    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+    '    .then(function(data){ activo = data.activo; pintar(); document.getElementById("estado").style.display = "flex"; document.getElementById("msg").textContent = ""; })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
     '}',
     'cargar();',
-    'document.getElementById("btnToggle").addEventListener("click", function() {',
-    '  var nuevoValor = !activo;',
+    'document.getElementById("chkToggle").addEventListener("change", function() {',
+    '  var nuevoValor = this.checked;',
     '  fetch("/admin/switch-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({activo: nuevoValor})})',
     '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo guardar"); } return r.json(); })',
-    '    .then(function(){ activo = nuevoValor; pintar(); document.getElementById("msg").textContent = "Listo, se guardó."; document.getElementById("msg").style.color = "#2e7d32"; })',
-    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+    '    .then(function(){ activo = nuevoValor; pintar(); document.getElementById("msg").textContent = "Listo, se guardó."; document.getElementById("msg").className = "msg-ok"; })',
+    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; });',
     '});',
     '</' + 'script>',
+    '</div>',
     '</body></html>'
   ].join("\n");
   res.type("html").send(html);
@@ -1493,28 +1978,23 @@ app.get("/admin/inactivos", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Clientes inactivos</title>',
-    '<style>',
-    'body{font-family:sans-serif;max-width:700px;margin:30px auto;padding:0 16px;color:#2b2118;}',
-    'h1{font-size:20px}',
-    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
-    'button{font-size:15px;padding:10px 16px;border:none;border-radius:6px;cursor:pointer;margin-top:10px;background:#C0392B;color:#fff}',
-    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;margin-bottom:10px}',
-    '.card{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px}',
-    '.nombre{font-weight:bold;font-size:15px}',
-    '.tel{font-size:12px;color:#6b6258}',
-    '.detalle{font-size:13px;margin-top:6px}',
-    '#msg{margin-top:14px;font-weight:bold}',
-    '</style></head><body>',
-    '<a class="back" href="/admin">&larr; Volver al panel</a>',
+    `<style>${ADMIN_BASE_CSS}
+      .inactivo-nombre { font-weight: 700; font-size: 15px; }
+      .inactivo-tel { font-size: 12px; color: var(--texto-tenue); margin-top: 2px; }
+      .inactivo-detalle { font-size: 12.5px; margin-top: 6px; color: var(--texto-tenue); line-height: 1.5; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
     '<h1>📉 Clientes inactivos</h1>',
-    '<p style="font-size:13px;color:#6b6258">Detecta clientes que pedían regularmente y hace rato no piden. Al revisar, también te llega un aviso a WhatsApp con la lista.</p>',
-    '<button id="btnVer">Revisar clientes inactivos</button>',
+    '<p class="sub">Detecta clientes que pedían regularmente y hace rato no piden. Al revisar, también te llega un aviso a WhatsApp con la lista.</p>',
+    '<button class="btn-primary" id="btnVer">Revisar clientes inactivos</button>',
     '<div id="msg"></div>',
     '<div id="lista"></div>',
     '<script>',
     'document.getElementById("btnVer").addEventListener("click", function() {',
     '  document.getElementById("msg").textContent = "Revisando...";',
-    '  document.getElementById("msg").style.color = "#2b2118";',
+    '  document.getElementById("msg").className = "";',
     '  fetch("/admin/inactivos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){',
@@ -1523,19 +2003,21 @@ app.get("/admin/inactivos", requireAdminPage, (_req, res) => {
     '      data.inactivos.forEach(function(c) {',
     '        var div = document.createElement("div");',
     '        div.className = "card";',
-    '        div.innerHTML = "<span class=\\"nombre\\">" + c.nombre + "</span><div class=\\"tel\\">+" + c.telefono + "</div>" +',
-    '          "<div class=\\"detalle\\">Pedía cada ~" + c.promedioDias + " días · hace " + c.diasSinPedir + " días que no pide</div>" +',
-    '          "<div class=\\"detalle\\">Último pedido: " + c.ultimoPedido + "</div>";',
+    '        div.innerHTML = "<span class=\\"inactivo-nombre\\">" + c.nombre + "</span><div class=\\"inactivo-tel\\">+" + c.telefono + "</div>" +',
+    '          "<div class=\\"inactivo-detalle\\">Pedía cada ~" + c.promedioDias + " días · hace " + c.diasSinPedir + " días que no pide</div>" +',
+    '          "<div class=\\"inactivo-detalle\\">Último pedido: " + c.ultimoPedido + "</div>";',
     '        cont.appendChild(div);',
     '      });',
+    '      if (data.inactivos.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">✨</div>No se encontraron clientes inactivos por ahora.</div>"; }',
     '      var txt = data.inactivos.length + " clientes inactivos encontrados.";',
     '      txt += data.avisoEnviado ? " Te mandamos el resumen por WhatsApp." : (data.inactivos.length > 0 ? " (No se pudo mandar el WhatsApp — revisá el teléfono del dueño en Configuración.)" : "");',
     '      document.getElementById("msg").textContent = txt;',
-    '      document.getElementById("msg").style.color = "#2e7d32";',
+    '      document.getElementById("msg").className = "msg-ok";',
     '    })',
-    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
+    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; });',
     '});',
     '</' + 'script>',
+    '</div>',
     '</body></html>'
   ].join("\n");
   res.type("html").send(html);
