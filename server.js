@@ -80,6 +80,39 @@ function saveClientes(lista) {
 function buscarCliente(lista, telefono) {
   return lista.find((c) => soloDigitos(c.telefono) === soloDigitos(telefono));
 }
+
+// ---- Inbox: historial de conversaciones persistente + modo manual por chat
+//      (para poder responder vos mismo desde /admin/inbox, sin depender de
+//      la app de WhatsApp Business en el celular) ----
+const INBOX_PATH = path.join(DATA_DIR, "inbox.json");
+function loadInbox() {
+  try {
+    return JSON.parse(fs.readFileSync(INBOX_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function saveInbox(inbox) {
+  fs.writeFileSync(INBOX_PATH, JSON.stringify(inbox, null, 2), "utf8");
+}
+function agregarMensajeInbox(telefono, rol, texto, nombre) {
+  const inbox = loadInbox();
+  const tel = soloDigitos(telefono);
+  if (!inbox[tel]) {
+    inbox[tel] = { telefono: tel, nombre: nombre || "", modoManual: false, ultimaActividad: new Date().toISOString(), mensajes: [] };
+  }
+  if (nombre && !inbox[tel].nombre) inbox[tel].nombre = nombre;
+  inbox[tel].mensajes.push({ rol, texto, fecha: new Date().toISOString() });
+  if (inbox[tel].mensajes.length > 100) inbox[tel].mensajes = inbox[tel].mensajes.slice(-100);
+  inbox[tel].ultimaActividad = new Date().toISOString();
+  saveInbox(inbox);
+  return inbox[tel];
+}
+function chatEnModoManual(telefono) {
+  const inbox = loadInbox();
+  const chat = inbox[soloDigitos(telefono)];
+  return !!(chat && chat.modoManual);
+}
 function esCumpleañosHoy(cumpleanosDDMM, fechaHoyISO) {
   if (!cumpleanosDDMM || !fechaHoyISO) return false;
   const hoyDDMM = fechaHoyISO.slice(5); // "YYYY-MM-DD" -> "MM-DD"
@@ -154,14 +187,9 @@ const ADMIN_CONFIG_PAGE = [
   '</style></head><body>',
   '<a class="back" href="/admin">&larr; Volver al panel</a>',
   '<h1>Editar precios, horarios, promos y telefonos</h1>',
-  '<div id="gate">',
-  '<label>Contrasena de administrador</label>',
-  '<input type="password" id="password" />',
-  '<button class="btn-primary" id="btnCargar">Cargar configuracion</button>',
-  '<button class="btn-secondary" id="btnReset" style="margin-top:8px;">Restaurar valores del repositorio (GitHub)</button>',
+  '<button class="btn-secondary" id="btnReset">Restaurar valores del repositorio (GitHub)</button>',
   '<p style="font-size:11px;color:#6b6258;margin-top:4px;">Usalo solo si los cambios que hacés acá no se guardan al reiniciar el servidor. Pisa TODO lo que hayas cambiado en este panel con lo que esté subido en GitHub.</p>',
-  '</div>',
-  '<div id="msg"></div>',
+  '<div id="msg">Cargando...</div>',
   '<div id="formArea"></div>',
   '<script>',
   'var cfg = null;',
@@ -178,19 +206,18 @@ const ADMIN_CONFIG_PAGE = [
   'function numInput(value) { var i = el("input", {type:"number"}); i.value = value != null ? value : 0; return i; }',
   'function taInput(value) { var i = el("textarea"); i.value = value || ""; return i; }',
   '',
-  'document.getElementById("btnCargar").addEventListener("click", function() {',
-  '  var pw = document.getElementById("password").value;',
-  '  fetch("/admin/config-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
-  '    .then(function(r){ if (!r.ok) { throw new Error("Contrasena incorrecta"); } return r.json(); })',
-  '    .then(function(data){ cfg = data; cfg.__pw = pw; renderForm(); document.getElementById("gate").style.display="none"; document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent=""; })',
-  '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
-  '});',
+  'function cargarConfig() {',
+  '  fetch("/admin/config-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+  '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+  '    .then(function(data){ cfg = data; renderForm(); document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent=""; })',
+  '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+  '}',
+  'cargarConfig();',
   'document.getElementById("btnReset").addEventListener("click", function() {',
-  '  var pw = document.getElementById("password").value;',
   '  if (!confirm("Esto va a pisar TODO lo que hayas cargado en el panel con lo que esta subido en GitHub ahora mismo. Seguro?")) return;',
-  '  fetch("/admin/config-reset-from-repo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
-  '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo restaurar (revisa la contrasena)"); } return r.json(); })',
-  '    .then(function(data){ cfg = data.config; cfg.__pw = pw; renderForm(); document.getElementById("gate").style.display="none"; document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent = "Listo, se restauro desde el repositorio."; document.getElementById("msg").style.color = "#2e7d32"; })',
+  '  fetch("/admin/config-reset-from-repo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+  '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo restaurar"); } return r.json(); })',
+  '    .then(function(data){ cfg = data.config; renderForm(); document.getElementById("formArea").style.display="block"; document.getElementById("msg").textContent = "Listo, se restauro desde el repositorio."; document.getElementById("msg").style.color = "#2e7d32"; })',
   '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
   '});',
   '',
@@ -409,7 +436,6 @@ const ADMIN_CONFIG_PAGE = [
   '  btnGuardar.style.width = "100%";',
   '  btnGuardar.addEventListener("click", function() {',
   '    var nuevo = JSON.parse(JSON.stringify(cfg));',
-  '    delete nuevo.__pw;',
   '    nuevo.horarios = horariosInput.value;',
   '    nuevo.tiendaOnlineUrl = tiendaInput.value;',
   '    nuevo.amenities = {adentro: amAdentro.value, patio: amPatio.value, vereda: amVereda.value};',
@@ -430,7 +456,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.promosDia = promosDiaData;',
   '    document.getElementById("msg").textContent = "Guardando...";',
   '    document.getElementById("msg").style.color = "#2b2118";',
-  '    fetch("/admin/config-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: cfg.__pw, config: nuevo})})',
+  '    fetch("/admin/config-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({config: nuevo})})',
   '      .then(function(r){ if (!r.ok) { throw new Error("No se pudo guardar"); } return r.json(); })',
   '      .then(function(){ document.getElementById("msg").textContent = "Listo, se guardaron los cambios. El agente ya los usa."; document.getElementById("msg").style.color = "#2e7d32"; window.scrollTo(0,0); })',
   '      .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
@@ -460,6 +486,112 @@ const {
   ADMIN_PASSWORD,
   PORT = 3000,
 } = process.env;
+
+// ==================== Sesión de administrador (login único, cookie) ====================
+// Antes cada página del panel pedía la contraseña por separado. Ahora te logueás una
+// vez en /admin/login y esa sesión te sirve para todas las páginas del panel por 12hs.
+const crypto = require("crypto");
+const ADMIN_SESSIONS = new Map(); // token -> timestamp de expiración (ms)
+const ADMIN_SESSION_COOKIE = "chap_admin_sesion";
+const ADMIN_SESSION_DURATION_MS = 12 * 60 * 60 * 1000; // 12 horas
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const cookies = {};
+  if (!header) return cookies;
+  header.split(";").forEach((parte) => {
+    const idx = parte.indexOf("=");
+    if (idx === -1) return;
+    const clave = parte.slice(0, idx).trim();
+    const valor = parte.slice(idx + 1).trim();
+    cookies[clave] = decodeURIComponent(valor);
+  });
+  return cookies;
+}
+
+function tieneSesionAdminValida(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[ADMIN_SESSION_COOKIE];
+  if (!token) return false;
+  const expira = ADMIN_SESSIONS.get(token);
+  if (!expira || expira < Date.now()) {
+    ADMIN_SESSIONS.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function crearSesionAdmin(res) {
+  const token = crypto.randomBytes(24).toString("hex");
+  ADMIN_SESSIONS.set(token, Date.now() + ADMIN_SESSION_DURATION_MS);
+  res.setHeader(
+    "Set-Cookie",
+    `${ADMIN_SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(ADMIN_SESSION_DURATION_MS / 1000)}; SameSite=Lax`
+  );
+}
+
+function cerrarSesionAdmin(req, res) {
+  const cookies = parseCookies(req);
+  const token = cookies[ADMIN_SESSION_COOKIE];
+  if (token) ADMIN_SESSIONS.delete(token);
+  res.setHeader("Set-Cookie", `${ADMIN_SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`);
+}
+
+// Middleware para páginas HTML del panel: si no hay sesión, redirige al login.
+function requireAdminPage(req, res, next) {
+  if (tieneSesionAdminValida(req)) return next();
+  return res.redirect("/admin/login");
+}
+
+// Middleware para los endpoints de datos (fetch/JSON) del panel: si no hay sesión, 401.
+function requireAdminApi(req, res, next) {
+  if (tieneSesionAdminValida(req)) return next();
+  return res.status(401).json({ error: "Sesión vencida, iniciá sesión de nuevo." });
+}
+
+app.get("/admin/login", (_req, res) => {
+  res.type("html").send([
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Ingresar</title>',
+    '<style>',
+    'body{font-family:sans-serif;max-width:380px;margin:80px auto;padding:0 20px;color:#2b2118;text-align:center;}',
+    'h1{font-size:20px}',
+    'input[type=password]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:12px;border:1px solid #E9DCC7;border-radius:6px}',
+    'button{font-size:15px;padding:12px;width:100%;box-sizing:border-box;margin-top:14px;border:none;border-radius:8px;cursor:pointer;background:#C0392B;color:#fff}',
+    '#msg{margin-top:14px;font-weight:bold;color:#C0392B}',
+    '</style></head><body>',
+    '<h1>🌮 Panel de Chaparrita</h1>',
+    '<p style="font-size:13px;color:#6b6258">Ingresá la contraseña de administrador una vez, y no te la vuelve a pedir por unas horas.</p>',
+    '<input type="password" id="password" placeholder="Contraseña" autofocus />',
+    '<button id="btnEntrar">Entrar</button>',
+    '<div id="msg"></div>',
+    '<script>',
+    'function intentarEntrar() {',
+    '  var pw = document.getElementById("password").value;',
+    '  fetch("/admin/login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    '    .then(function(){ window.location.href = "/admin"; })',
+    '    .catch(function(e){ document.getElementById("msg").textContent = e.message; });',
+    '}',
+    'document.getElementById("btnEntrar").addEventListener("click", intentarEntrar);',
+    'document.getElementById("password").addEventListener("keydown", function(e){ if (e.key === "Enter") intentarEntrar(); });',
+    '</' + 'script>',
+    '</body></html>'
+  ].join("\n"));
+});
+
+app.post("/admin/login-check", (req, res) => {
+  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña incorrecta" });
+  }
+  crearSesionAdmin(res);
+  res.json({ ok: true });
+});
+
+app.get("/admin/logout", (req, res) => {
+  cerrarSesionAdmin(req, res);
+  res.redirect("/admin/login");
+});
 
 // ==================== Verificación del webhook (Meta) ====================
 app.get("/webhook", (req, res) => {
@@ -533,6 +665,20 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Guardamos el mensaje entrante en el inbox persistente para el panel /admin/inbox,
+    // sin importar si el mensaje es texto o imagen (usamos un texto descriptivo para imágenes).
+    const clientesParaNombre = loadClientes();
+    const perfilParaNombre = buscarCliente(clientesParaNombre, from);
+    const textoParaInbox = message.type === "text" ? message.text.body : "[Imagen]" + (message.image?.caption ? `: ${message.image.caption}` : "");
+    agregarMensajeInbox(from, "cliente", textoParaInbox, perfilParaNombre ? perfilParaNombre.nombre : "");
+
+    // Si esta conversación puntual está en modo manual (alguien la está atendiendo a mano
+    // desde /admin/inbox), el bot no contesta — se corta acá.
+    if (chatEnModoManual(from)) {
+      console.log(`Chat con ${from} está en modo manual — el bot no responde, queda para que lo atienda un humano desde /admin/inbox.`);
+      return;
+    }
+
     const contentBlocks = await buildUserContentBlocks(message);
     if (!contentBlocks) return;
 
@@ -559,6 +705,7 @@ app.post("/webhook", async (req, res) => {
     conversations.set(from, history);
 
     await sendWhatsappText(from, cleanText2);
+    agregarMensajeInbox(from, "chaparrita", cleanText2);
 
     if (reservaConfirmada && config.grupoReservasWhatsappId) {
       await sendWhatsappText(config.grupoReservasWhatsappId, reservaConfirmada);
@@ -817,7 +964,7 @@ async function sendWhatsappImage(to, mediaId, caption) {
 app.get("/", (_req, res) => res.send("Chaparrita agente — backend activo ✅"));
 
 // ==================== Panel de administración ====================
-app.get("/admin", (_req, res) => {
+app.get("/admin", requireAdminPage, (_req, res) => {
   res.type("html").send(`
     <!DOCTYPE html>
     <html lang="es">
@@ -827,21 +974,24 @@ app.get("/admin", (_req, res) => {
         h1 { font-size: 20px; }
         a.tile { display: block; padding: 18px; margin-top: 14px; border-radius: 10px; background: #F6EEDF; border: 1px solid #E9DCC7; text-decoration: none; color: #2b2118; }
         a.tile b { display: block; color: #C0392B; font-size: 16px; margin-bottom: 4px; }
+        a.logout { display: inline-block; margin-top: 24px; color: #6b6258; text-decoration: none; font-size: 13px; }
       </style>
     </head>
     <body>
       <h1>🌮 Panel de Chaparrita</h1>
       <a class="tile" href="/admin/switch"><b>🔌 Prender / apagar el asistente</b>Pausalo cuando un operador quiera atender en persona.</a>
+      <a class="tile" href="/admin/inbox"><b>💬 Atender manualmente</b>Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</a>
       <a class="tile" href="/admin/clientes"><b>👥 Clientes conocidos</b>Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</a>
       <a class="tile" href="/admin/inactivos"><b>📉 Clientes inactivos</b>Detecta clientes que dejaron de pedir y te avisa por WhatsApp.</a>
       <a class="tile" href="/admin/menu"><b>📋 Actualizar el menú</b>Subir un PDF nuevo con precios y productos.</a>
       <a class="tile" href="/admin/config"><b>⚙️ Precios, horarios, promos y teléfonos</b>Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</a>
+      <a class="logout" href="/admin/logout">Cerrar sesión</a>
     </body>
     </html>
   `);
 });
 
-app.get("/admin/menu", (_req, res) => {
+app.get("/admin/menu", requireAdminPage, (_req, res) => {
   res.type("html").send(`
     <!DOCTYPE html>
     <html lang="es">
@@ -860,8 +1010,6 @@ app.get("/admin/menu", (_req, res) => {
       <h1>🌮 Actualizar menú de Chaparrita</h1>
       <p>Subí el PDF del menú nuevo. El agente lo va a usar en la próxima conversación, sin necesidad de tocar código.</p>
       <form action="/admin/upload-menu" method="POST" enctype="multipart/form-data">
-        <label>Contraseña de administrador</label>
-        <input type="password" name="password" required />
         <label>Archivo PDF del menú</label>
         <input type="file" name="menuPdf" accept="application/pdf" required />
         <button type="submit">Subir y actualizar menú</button>
@@ -871,11 +1019,8 @@ app.get("/admin/menu", (_req, res) => {
   `);
 });
 
-app.post("/admin/upload-menu", upload.single("menuPdf"), async (req, res) => {
+app.post("/admin/upload-menu", requireAdminApi, upload.single("menuPdf"), async (req, res) => {
   try {
-    if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-      return res.status(401).send("Contraseña incorrecta.");
-    }
     if (!req.file) {
       return res.status(400).send("No se recibió ningún archivo PDF.");
     }
@@ -903,7 +1048,7 @@ app.post("/admin/upload-menu", upload.single("menuPdf"), async (req, res) => {
 });
 
 // ==================== Switch rápido para prender/apagar el asistente ====================
-app.get("/admin/clientes", (_req, res) => {
+app.get("/admin/clientes", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Clientes</title>',
@@ -923,12 +1068,7 @@ app.get("/admin/clientes", (_req, res) => {
     '</style></head><body>',
     '<a class="back" href="/admin">&larr; Volver al panel</a>',
     '<h1>👥 Clientes conocidos</h1>',
-    '<div id="gate">',
-    '<label style="font-weight:bold;font-size:13px;">Contraseña de administrador</label>',
-    '<input type="password" id="password" />',
-    '<button id="btnVer">Ver clientes</button>',
-    '</div>',
-    '<div id="msg"></div>',
+    '<div id="msg">Cargando...</div>',
     '<div id="filtros" style="display:none;margin-top:10px;">',
     '  <button id="btnOrdenVisita" class="btn-toggle" style="background:#F0EBE3;color:#2b2118;padding:8px 12px;font-size:13px;">Por última visita</button>',
     '  <button id="btnOrdenCumple" class="btn-toggle" style="background:#F0EBE3;color:#2b2118;padding:8px 12px;font-size:13px;">🎂 Próximos cumpleaños</button>',
@@ -948,20 +1088,19 @@ app.get("/admin/clientes", (_req, res) => {
     '  if (prox < hoy) prox = new Date(anio+1, mes-1, dia);',
     '  return Math.round((prox - hoy) / (1000*60*60*24));',
     '}',
-    'document.getElementById("btnVer").addEventListener("click", function() {',
-    '  var pw = document.getElementById("password").value;',
-    '  fetch("/admin/clientes-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
-    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    'function cargar() {',
+    '  fetch("/admin/clientes-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){',
     '      todos = data;',
-    '      document.getElementById("gate").style.display = "none";',
     '      document.getElementById("filtros").style.display = "block";',
     '      document.getElementById("buscador").style.display = "block";',
     '      document.getElementById("msg").textContent = todos.length + " clientes guardados.";',
     '      pintar(todos);',
     '    })',
-    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
-    '});',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+    '}',
+    'cargar();',
     'document.getElementById("btnOrdenVisita").addEventListener("click", function(){ modoOrden = "visita"; pintar(todos); });',
     'document.getElementById("btnOrdenCumple").addEventListener("click", function(){ modoOrden = "cumple"; pintar(todos); });',
     'document.getElementById("buscador").addEventListener("input", function() {',
@@ -1003,14 +1142,190 @@ app.get("/admin/clientes", (_req, res) => {
   res.type("html").send(html);
 });
 
-app.post("/admin/clientes-data", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/clientes-data", requireAdminApi, (req, res) => {
   res.json(loadClientes());
 });
 
-app.get("/admin/switch", (_req, res) => {
+// ==================== Bandeja de entrada manual (atender sin usar el celular) ====================
+app.get("/admin/inbox", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Atender manualmente</title>',
+    '<style>',
+    'body{font-family:sans-serif;max-width:760px;margin:20px auto;padding:0 16px;color:#2b2118;}',
+    'h1{font-size:20px}',
+    'input[type=password],input[type=text]{font-size:15px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px;border:1px solid #E9DCC7;border-radius:6px}',
+    'button{font-size:15px;padding:10px 16px;border:none;border-radius:6px;cursor:pointer;margin-top:10px;background:#C0392B;color:#fff}',
+    'a.back{color:#C0392B;text-decoration:none;font-size:13px;display:block;margin-bottom:10px}',
+    '.chatCard{background:#F6EEDF;border:1px solid #E9DCC7;border-radius:8px;padding:12px;margin-top:10px;cursor:pointer}',
+    '.chatCard:hover{background:#F0E6D2}',
+    '.nombre{font-weight:bold;font-size:15px}',
+    '.tel{font-size:12px;color:#6b6258}',
+    '.ultimo{font-size:13px;margin-top:6px;color:#2b2118;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.badge{display:inline-block;background:#C0392B;color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;margin-left:8px}',
+    '#msg{margin-top:14px;font-weight:bold}',
+    '#listaChats{display:block}',
+    '#vistaChat{display:none}',
+    '.burbuja{max-width:80%;padding:8px 12px;border-radius:12px;margin-top:8px;font-size:14px;white-space:pre-wrap}',
+    '.cliente{background:#F0EBE3;margin-right:auto}',
+    '.chaparrita{background:#DCF3D6;margin-left:auto;text-align:left}',
+    '.humano{background:#D6E8F3;margin-left:auto;text-align:left}',
+    '.hora{font-size:10px;color:#6b6258;margin-top:2px}',
+    '#mensajes{display:flex;flex-direction:column;max-height:60vh;overflow-y:auto;padding:8px;background:#fff;border:1px solid #E9DCC7;border-radius:8px;margin-top:10px}',
+    '.toggleRow{display:flex;align-items:center;gap:8px;margin-top:10px}',
+    '.toggleRow label{font-size:13px;font-weight:normal}',
+    '.enviarRow{display:flex;gap:8px;margin-top:10px}',
+    '.enviarRow input{margin-top:0}',
+    '.enviarRow button{margin-top:0;white-space:nowrap}',
+    '</style></head><body>',
+    '<a class="back" href="/admin">&larr; Volver al panel</a>',
+    '<h1>💬 Atender manualmente</h1>',
+    '<div id="msg">Cargando...</div>',
+    '<div id="listaChats"></div>',
+    '<div id="vistaChat">',
+    '  <a class="back" href="#" id="btnVolverLista">&larr; Volver a la lista</a>',
+    '  <div id="nombreChatActivo" style="font-weight:bold;font-size:16px;"></div>',
+    '  <div class="toggleRow">',
+    '    <input type="checkbox" id="chkManual" />',
+    '    <label for="chkManual">Modo manual activo (el bot no responde en este chat)</label>',
+    '  </div>',
+    '  <div id="mensajes"></div>',
+    '  <div class="enviarRow">',
+    '    <input type="text" id="textoAEnviar" placeholder="Escribí tu mensaje..." />',
+    '    <button id="btnEnviar">Enviar</button>',
+    '  </div>',
+    '</div>',
+    '<script>',
+    'var telefonoActivo = null;',
+    'function cargarLista() {',
+    '  fetch("/admin/inbox-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      document.getElementById("msg").textContent = "";',
+    '      pintarLista(data.chats);',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+    '}',
+    'cargarLista();',
+    'function pintarLista(chats) {',
+    '  var cont = document.getElementById("listaChats");',
+    '  document.getElementById("vistaChat").style.display = "none";',
+    '  cont.style.display = "block";',
+    '  cont.innerHTML = "";',
+    '  chats.sort(function(a,b){ return new Date(b.ultimaActividad) - new Date(a.ultimaActividad); });',
+    '  if (chats.length === 0) { cont.innerHTML = "<p>Todavía no hay conversaciones guardadas.</p>"; return; }',
+    '  chats.forEach(function(c) {',
+    '    var div = document.createElement("div");',
+    '    div.className = "chatCard";',
+    '    var ultimoMsg = c.mensajes.length ? c.mensajes[c.mensajes.length - 1] : null;',
+    '    var badge = c.modoManual ? "<span class=\\"badge\\">MANUAL</span>" : "";',
+    '    div.innerHTML = "<span class=\\"nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" + badge +',
+    '      "<div class=\\"tel\\">+" + c.telefono + "</div>" +',
+    '      "<div class=\\"ultimo\\">" + (ultimoMsg ? ultimoMsg.texto : "") + "</div>";',
+    '    div.addEventListener("click", function(){ abrirChat(c.telefono); });',
+    '    cont.appendChild(div);',
+    '  });',
+    '}',
+    'function abrirChat(telefono) {',
+    '  telefonoActivo = telefono;',
+    '  fetch("/admin/inbox-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      var chat = data.chats.find(function(c){ return c.telefono === telefono; });',
+    '      if (!chat) return;',
+    '      document.getElementById("listaChats").style.display = "none";',
+    '      document.getElementById("vistaChat").style.display = "block";',
+    '      document.getElementById("nombreChatActivo").textContent = (chat.nombre || "(sin nombre)") + " · +" + chat.telefono;',
+    '      document.getElementById("chkManual").checked = !!chat.modoManual;',
+    '      pintarMensajes(chat.mensajes);',
+    '    });',
+    '}',
+    'function pintarMensajes(mensajes) {',
+    '  var cont = document.getElementById("mensajes");',
+    '  cont.innerHTML = "";',
+    '  mensajes.forEach(function(m) {',
+    '    var div = document.createElement("div");',
+    '    div.className = "burbuja " + (m.rol === "cliente" ? "cliente" : (m.rol === "humano" ? "humano" : "chaparrita"));',
+    '    var hora = new Date(m.fecha).toLocaleString("es-AR");',
+    '    div.innerHTML = m.texto.replace(/</g,"&lt;") + "<div class=\\"hora\\">" + hora + (m.rol === "humano" ? " · vos" : (m.rol === "chaparrita" ? " · Chaparrita (bot)" : "")) + "</div>";',
+    '    cont.appendChild(div);',
+    '  });',
+    '  cont.scrollTop = cont.scrollHeight;',
+    '}',
+    'document.getElementById("btnVolverLista").addEventListener("click", function(e){ e.preventDefault(); cargarLista(); });',
+    'document.getElementById("chkManual").addEventListener("change", function() {',
+    '  var activo = this.checked;',
+    '  fetch("/admin/inbox-toggle-manual", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telefono: telefonoActivo, modoManual: activo})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .catch(function(){});',
+    '});',
+    'document.getElementById("btnEnviar").addEventListener("click", enviarMensaje);',
+    'document.getElementById("textoAEnviar").addEventListener("keydown", function(e){ if (e.key === "Enter") enviarMensaje(); });',
+    'function enviarMensaje() {',
+    '  var input = document.getElementById("textoAEnviar");',
+    '  var texto = input.value.trim();',
+    '  if (!texto || !telefonoActivo) return;',
+    '  input.value = "";',
+    '  fetch("/admin/inbox-send", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telefono: telefonoActivo, mensaje: texto})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo enviar"); } return r.json(); })',
+    '    .then(function(){ abrirChat(telefonoActivo); })',
+    '    .catch(function(e){ alert("Error al enviar: " + e.message); });',
+    '}',
+    '</' + 'script>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/inbox-data", requireAdminApi, (req, res) => {
+  const inbox = loadInbox();
+  res.json({ chats: Object.values(inbox) });
+});
+
+app.post("/admin/inbox-toggle-manual", requireAdminApi, (req, res) => {
+  try {
+    const inbox = loadInbox();
+    const tel = soloDigitos(req.body.telefono);
+    if (!inbox[tel]) {
+      return res.status(404).json({ error: "Chat no encontrado" });
+    }
+    inbox[tel].modoManual = !!req.body.modoManual;
+    saveInbox(inbox);
+    console.log(`Chat con ${tel} pasó a modo ${inbox[tel].modoManual ? "MANUAL" : "AUTOMÁTICO"} desde /admin/inbox.`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al cambiar modo manual:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/inbox-send", requireAdminApi, async (req, res) => {
+  try {
+    const telefono = req.body.telefono;
+    const mensaje = (req.body.mensaje || "").trim();
+    if (!telefono || !mensaje) {
+      return res.status(400).json({ error: "Falta teléfono o mensaje" });
+    }
+    const enviado = await sendWhatsappText(telefono, mensaje);
+    if (!enviado) {
+      return res.status(502).json({ error: "No se pudo enviar el mensaje por WhatsApp" });
+    }
+    agregarMensajeInbox(telefono, "humano", mensaje);
+
+    // También lo sumamos al historial que usa Claude, para que si el chat vuelve a modo
+    // automático más tarde, el bot tenga contexto de lo que ya se le contestó a mano.
+    const history = conversations.get(soloDigitos(telefono)) || conversations.get(telefono) || [];
+    history.push({ role: "assistant", content: [{ type: "text", text: mensaje }] });
+    conversations.set(telefono, history);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al enviar mensaje manual:", err);
+    res.status(500).json({ error: "No se pudo enviar" });
+  }
+});
+
+app.get("/admin/switch", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Prender o apagar</title>',
@@ -1033,15 +1348,12 @@ app.get("/admin/switch", (_req, res) => {
     '<a class="back" href="/admin">&larr; Volver al panel</a>',
     '<h1>🔌 Prender / apagar el asistente</h1>',
     '<p style="font-size:13px;color:#6b6258">Mientras está apagado, Chaparrita no responde nada por WhatsApp — queda todo para que lo atienda un operador a mano.</p>',
-    '<input type="password" id="password" placeholder="Contraseña de administrador" />',
-    '<button class="btn-primary" id="btnVer">Ver estado</button>',
     '<div id="estado">',
     '  <div id="pill" class="pill">...</div>',
     '  <button id="btnToggle" class="btn-toggle"></button>',
     '</div>',
-    '<div id="msg"></div>',
+    '<div id="msg">Cargando...</div>',
     '<script>',
-    'var pw = "";',
     'var activo = null;',
     'function pintar() {',
     '  var pill = document.getElementById("pill");',
@@ -1058,16 +1370,16 @@ app.get("/admin/switch", (_req, res) => {
     '    btn.className = "btn-toggle btn-on";',
     '  }',
     '}',
-    'document.getElementById("btnVer").addEventListener("click", function() {',
-    '  pw = document.getElementById("password").value;',
-    '  fetch("/admin/switch-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
-    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    'function cargar() {',
+    '  fetch("/admin/switch-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){ activo = data.activo; pintar(); document.getElementById("estado").style.display = "block"; document.getElementById("msg").textContent = ""; })',
-    '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
-    '});',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; } });',
+    '}',
+    'cargar();',
     'document.getElementById("btnToggle").addEventListener("click", function() {',
     '  var nuevoValor = !activo;',
-    '  fetch("/admin/switch-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw, activo: nuevoValor})})',
+    '  fetch("/admin/switch-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({activo: nuevoValor})})',
     '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo guardar"); } return r.json(); })',
     '    .then(function(){ activo = nuevoValor; pintar(); document.getElementById("msg").textContent = "Listo, se guardó."; document.getElementById("msg").style.color = "#2e7d32"; })',
     '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").style.color = "#C0392B"; });',
@@ -1078,18 +1390,12 @@ app.get("/admin/switch", (_req, res) => {
   res.type("html").send(html);
 });
 
-app.post("/admin/switch-data", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/switch-data", requireAdminApi, (req, res) => {
   const config = loadConfig();
   res.json({ activo: config.asistenteActivo !== false });
 });
 
-app.post("/admin/switch-save", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/switch-save", requireAdminApi, (req, res) => {
   const config = loadConfig();
   config.asistenteActivo = !!req.body.activo;
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
@@ -1098,21 +1404,15 @@ app.post("/admin/switch-save", (req, res) => {
 });
 
 // ==================== Editor de configuración (precios, promos, teléfonos, horarios) ====================
-app.get("/admin/config", (_req, res) => {
+app.get("/admin/config", requireAdminPage, (_req, res) => {
   res.type("html").send(ADMIN_CONFIG_PAGE);
 });
 
-app.post("/admin/config-data", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/config-data", requireAdminApi, (req, res) => {
   res.json(loadConfig());
 });
 
-app.post("/admin/config-save", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/config-save", requireAdminApi, (req, res) => {
   try {
     const nuevaConfig = req.body.config;
     if (!nuevaConfig || typeof nuevaConfig !== "object") {
@@ -1129,10 +1429,7 @@ app.post("/admin/config-save", (req, res) => {
 
 // Fuerza a copiar el config.json que viene con el código (el del repo) al volumen persistente,
 // pisando lo que haya ahí guardado. Útil cuando el volumen quedó con datos viejos.
-app.post("/admin/config-reset-from-repo", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/config-reset-from-repo", requireAdminApi, (req, res) => {
   try {
     if (!fs.existsSync(LEGACY_CONFIG_PATH)) {
       return res.status(404).json({ error: "No se encontró config.json en el repo" });
@@ -1192,7 +1489,7 @@ function construirMensajeInactivos(inactivos) {
   return mensaje;
 }
 
-app.get("/admin/inactivos", (_req, res) => {
+app.get("/admin/inactivos", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
     '<title>Chaparrita - Clientes inactivos</title>',
@@ -1211,17 +1508,15 @@ app.get("/admin/inactivos", (_req, res) => {
     '<a class="back" href="/admin">&larr; Volver al panel</a>',
     '<h1>📉 Clientes inactivos</h1>',
     '<p style="font-size:13px;color:#6b6258">Detecta clientes que pedían regularmente y hace rato no piden. Al revisar, también te llega un aviso a WhatsApp con la lista.</p>',
-    '<input type="password" id="password" placeholder="Contraseña de administrador" />',
     '<button id="btnVer">Revisar clientes inactivos</button>',
     '<div id="msg"></div>',
     '<div id="lista"></div>',
     '<script>',
     'document.getElementById("btnVer").addEventListener("click", function() {',
-    '  var pw = document.getElementById("password").value;',
     '  document.getElementById("msg").textContent = "Revisando...";',
     '  document.getElementById("msg").style.color = "#2b2118";',
-    '  fetch("/admin/inactivos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
-    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    '  fetch("/admin/inactivos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
     '    .then(function(data){',
     '      var cont = document.getElementById("lista");',
     '      cont.innerHTML = "";',
@@ -1246,10 +1541,7 @@ app.get("/admin/inactivos", (_req, res) => {
   res.type("html").send(html);
 });
 
-app.post("/admin/inactivos-data", async (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
+app.post("/admin/inactivos-data", requireAdminApi, async (req, res) => {
   try {
     const clientes = loadClientes();
     const inactivos = calcularClientesInactivos(clientes);
