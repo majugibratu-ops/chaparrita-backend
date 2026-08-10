@@ -65,6 +65,82 @@ function saveReservas(lista) {
   fs.writeFileSync(RESERVAS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
+// ---- Disponibilidad de mesas (calculada, no requiere que nadie la marque a mano) ----
+const SECTORES_VALIDOS = ["adentro", "patio", "vereda"];
+
+function minutosDesdeHHMM(hhmm) {
+  const [h, m] = (hhmm || "00:00").split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+// Cuenta cuántas mesas de un sector están ocupadas en un horario dado, comparando
+// contra las reservas existentes de esa misma fecha y sector, con superposición de horario.
+function calcularDisponibilidad(config, reservas, sector, fechaISO, horaHHMM) {
+  const mesasPorSector = config.mesasPorSector || {};
+  const totalMesas = Number(mesasPorSector[sector]) || 0;
+
+  // Si todavía no se cargó la cantidad de mesas de este sector en /admin/config,
+  // no bloqueamos reservas por las dudas — se comporta como si no hubiera límite.
+  if (totalMesas <= 0) {
+    return { totalMesas: null, ocupadas: 0, libres: null, sinConfigurar: true };
+  }
+
+  const duracionMin = config.duracionMesaMinutos || 90;
+  const inicioSolicitado = minutosDesdeHHMM(horaHHMM);
+  const finSolicitado = inicioSolicitado + duracionMin;
+
+  const ocupadas = reservas.filter((r) => {
+    if (r.fecha !== fechaISO) return false;
+    if ((r.sector || "").toLowerCase() !== sector) return false;
+    const inicioExistente = minutosDesdeHHMM(r.hora);
+    const finExistente = inicioExistente + duracionMin;
+    // Se superponen si uno empieza antes de que el otro termine, en ambas direcciones.
+    return inicioSolicitado < finExistente && inicioExistente < finSolicitado;
+  }).length;
+
+  const libres = Math.max(0, totalMesas - ocupadas);
+  return { totalMesas, ocupadas, libres, sinConfigurar: false };
+}
+
+function extractDisponibilidadMarker(text) {
+  const regex = /\[\[CONSULTAR_DISPONIBILIDAD:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, consulta: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, consulta: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear CONSULTAR_DISPONIBILIDAD:", match[1]);
+    return { cleanText, consulta: null };
+  }
+}
+
+function extractListaEsperaMarker(text) {
+  const regex = /\[\[LISTA_ESPERA:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, datosEspera: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, datosEspera: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear LISTA_ESPERA:", match[1]);
+    return { cleanText, datosEspera: null };
+  }
+}
+
+// ---- Lista de espera (cuando no hay mesas disponibles en el sector/horario pedido) ----
+const LISTA_ESPERA_PATH = path.join(DATA_DIR, "listaEspera.json");
+function loadListaEspera() {
+  try {
+    return JSON.parse(fs.readFileSync(LISTA_ESPERA_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveListaEspera(lista) {
+  fs.writeFileSync(LISTA_ESPERA_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
 // ---- Perfiles de clientes (nombre, cumpleaños, historial de pedidos) ----
 const CLIENTES_PATH = path.join(DATA_DIR, "clientes.json");
 function loadClientes() {
@@ -399,6 +475,16 @@ const ADMIN_CONFIG_PAGE = [
   '  area.appendChild(field("Patio interno", amPatio));',
   '  area.appendChild(field("Vereda", amVereda));',
   '',
+  '  area.appendChild(el("h2", {text:"Mesas por sector y disponibilidad"}));',
+  '  area.appendChild(el("p", {text:"El agente calcula solo cu\u00e1ntas mesas quedan libres para cada horario, sin que nadie tenga que marcarlo a mano.", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var mesasCfg = cfg.mesasPorSector || {adentro:0, patio:0, vereda:0};',
+  '  var mesasAdentro = numInput(mesasCfg.adentro);',
+  '  var mesasPatio = numInput(mesasCfg.patio);',
+  '  var mesasVereda = numInput(mesasCfg.vereda);',
+  '  area.appendChild(el("div", {class:"row"}, [field("Mesas adentro", mesasAdentro), field("Mesas patio", mesasPatio), field("Mesas vereda", mesasVereda)]));',
+  '  var duracionMesaInput = numInput(cfg.duracionMesaMinutos || 90);',
+  '  area.appendChild(field("Duraci\u00f3n promedio de una mesa ocupada (minutos)", duracionMesaInput));',
+  '',
   '  area.appendChild(el("h2", {text:"Productos agotados hoy"}));',
   '  var agotadosBox = el("div", {id:"agotadosBox"});',
   '  var agotadosList = cfg.agotados.slice();',
@@ -555,6 +641,34 @@ const ADMIN_CONFIG_PAGE = [
   '  btnAddCadete.addEventListener("click", function(){ cadetesList.push({nombre:"Nuevo cadete", telefono:"", activo:true}); pintarCadetes(); });',
   '  area.appendChild(btnAddCadete);',
   '',
+  '  area.appendChild(el("h2", {text:"Aviso de reservas al staff"}));',
+  '  area.appendChild(el("p", {text:"La API de WhatsApp no permite mandar mensajes a grupos, asi que cuando se confirma una reserva se le avisa individualmente a cada persona activa de esta lista (ademas del grupo viejo, si sigue cargado). Cargá el telefono con codigo de pais y 9 (ej: 549370XXXXXXX).", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var avisosBox = el("div", {id:"avisosBox"});',
+  '  var avisosList = JSON.parse(JSON.stringify(cfg.avisosReservas || []));',
+  '  function pintarAvisos() {',
+  '    avisosBox.innerHTML = "";',
+  '    avisosList.forEach(function(a, idx) {',
+  '      var nombreI = textInput(a.nombre); nombreI.oninput = function(){ a.nombre = nombreI.value; };',
+  '      var telI = textInput(a.telefono); telI.oninput = function(){ a.telefono = telI.value; };',
+  '      var activoI = el("input", {type:"checkbox"}); activoI.checked = !!a.activo; activoI.onchange = function(){ a.activo = activoI.checked; };',
+  '      var lblActivo = el("label", {text:" Activo (recibe el aviso de reservas)"});',
+  '      lblActivo.style.display = "inline"; lblActivo.style.fontWeight = "normal";',
+  '      var btnDel = el("button", {type:"button", text:"Eliminar", class:"btn-danger"});',
+  '      btnDel.addEventListener("click", function(){ avisosList.splice(idx,1); pintarAvisos(); });',
+  '      var wrapChk = el("div", {}, [activoI, lblActivo]);',
+  '      var card = el("div", {class:"card"}, [',
+  '        el("div", {class:"row"}, [field("Nombre", nombreI), field("Telefono", telI)]),',
+  '        wrapChk, btnDel',
+  '      ]);',
+  '      avisosBox.appendChild(card);',
+  '    });',
+  '  }',
+  '  pintarAvisos();',
+  '  area.appendChild(avisosBox);',
+  '  var btnAddAviso = el("button", {type:"button", text:"+ Agregar persona", class:"btn-secondary"});',
+  '  btnAddAviso.addEventListener("click", function(){ avisosList.push({nombre:"Nueva persona", telefono:"", activo:true}); pintarAvisos(); });',
+  '  area.appendChild(btnAddAviso);',
+  '',
   '  area.appendChild(el("h2", {text:"Promociones por dia de la semana"}));',
   '  var promosDiaData = JSON.parse(JSON.stringify(cfg.promosDia));',
   '  var promosDiaBox = el("div", {id:"promosDiaBox"});',
@@ -599,6 +713,8 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.horarios = horariosInput.value;',
   '    nuevo.tiendaOnlineUrl = tiendaInput.value;',
   '    nuevo.amenities = {adentro: amAdentro.value, patio: amPatio.value, vereda: amVereda.value};',
+  '    nuevo.mesasPorSector = {adentro: Number(mesasAdentro.value), patio: Number(mesasPatio.value), vereda: Number(mesasVereda.value)};',
+  '    nuevo.duracionMesaMinutos = Number(duracionMesaInput.value);',
   '    nuevo.agotados = agotadosList;',
   '    nuevo["cumplea\u00f1os"].minPersonas = Number(minPersonasInput.value);',
   '    nuevo["cumplea\u00f1os"].paquetes = paquetesList;',
@@ -609,6 +725,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.staff = {cajera:{nombre:cajNombre.value, telefono:cajTel.value}, due\u00f1o:{nombre:duenoNombre.value, telefono:duenoTel.value}, cocina:{nombre:cocinaNombre.value, telefono:cocinaTel.value}};',
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
   '    nuevo.deliveryConfig = cadetesList;',
+  '    nuevo.avisosReservas = avisosList;',
   '    nuevo.tacosLibresPublico = {dias: DIAS_KEY.filter(function(d){ return tlpDiasChecks[d].checked; }), precioPersona: Number(tlpPrecioInput.value)};',
   '    nuevo["ofertaCumplea\u00f1osProximo"] = {activo: ofertaCumpleActivo.checked, diasAntes: Number(ofertaCumpleDias.value)};',
   '    nuevo["cumplea\u00f1osCliente"] = {activo: cumpleCliActivo.checked, descuentoPorcentaje: Number(cumpleCliDesc.value), shotsTequilaSiFestejaEnLocal: cumpleCliShots.checked};',
@@ -795,6 +912,10 @@ app.post("/webhook", async (req, res) => {
     const cadetes = config.deliveryConfig || [];
     const cadeteQueEscribe = cadetes.find((c) => soloDigitos(c.telefono) === soloDigitos(from));
     if (cadeteQueEscribe && message.type === "text") {
+      // Lo guardamos en la bandeja de /admin/inbox igual, aunque el cadete no pase por
+      // Claude — así queda visible en "Atender manualmente" como cualquier otra conversación.
+      agregarMensajeInbox(from, "cliente", message.text.body, cadeteQueEscribe.nombre);
+
       const pendiente = pendingDeliveryQuotes.get(soloDigitos(cadeteQueEscribe.telefono));
       if (pendiente) {
         pendingDeliveryQuotes.delete(soloDigitos(cadeteQueEscribe.telefono));
@@ -808,7 +929,7 @@ app.post("/webhook", async (req, res) => {
         histCliente.push({ role: "assistant", content: [{ type: "text", text: `(El cadete confirmó el costo de envío a ${pendiente.direccion}: "${textoCadete}")` }] });
         conversations.set(pendiente.customerPhone, histCliente);
       } else {
-        console.log(`Mensaje de cadete ${cadeteQueEscribe.nombre} sin ninguna consulta pendiente asociada — se ignora.`);
+        console.log(`Mensaje de cadete ${cadeteQueEscribe.nombre} sin ninguna consulta pendiente asociada — se ignora (pero queda guardado en /admin/inbox).`);
       }
       return;
     }
@@ -908,15 +1029,45 @@ app.post("/webhook", async (req, res) => {
     const promosHoy = (config.promosDia && config.promosDia[diaHoy]) ? config.promosDia[diaHoy].filter((p) => p.activa) : [];
     const clientes = loadClientes();
     const perfilCliente = buscarCliente(clientes, from) || null;
-    const replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
+    let replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
     console.log(`Respuesta de Claude generada (${replyText.length} caracteres):`, replyText.slice(0, 200));
+
+    // Si Claude necesita saber la disponibilidad real de mesas para seguir la reserva,
+    // la calculamos al instante y le devolvemos el dato en la misma conversación, para
+    // que arme la respuesta final ya con el número real (el cliente nunca ve este ida y vuelta).
+    const { cleanText: sinConsultaDispo, consulta: consultaDisponibilidad } = extractDisponibilidadMarker(replyText);
+    if (consultaDisponibilidad && SECTORES_VALIDOS.includes((consultaDisponibilidad.sector || "").toLowerCase())) {
+      const reservasActuales = loadReservas();
+      const disponibilidad = calcularDisponibilidad(
+        config,
+        reservasActuales,
+        consultaDisponibilidad.sector.toLowerCase(),
+        consultaDisponibilidad.fecha,
+        consultaDisponibilidad.hora
+      );
+      console.log(`Disponibilidad consultada (${consultaDisponibilidad.sector}, ${consultaDisponibilidad.fecha} ${consultaDisponibilidad.hora}): ${disponibilidad.libres}/${disponibilidad.totalMesas} libres.`);
+
+      if (sinConsultaDispo) {
+        history.push({ role: "assistant", content: [{ type: "text", text: sinConsultaDispo }] });
+      }
+      history.push({
+        role: "user",
+        content: [{
+          type: "text",
+          text: `[[DATOS_DISPONIBILIDAD: ${JSON.stringify(disponibilidad)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es el resultado de la consulta de disponibilidad que pediste. Usalo para responder de forma natural y seguir la conversación con el cliente.)`,
+        }],
+      });
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
+      console.log(`Respuesta de Claude tras consultar disponibilidad (${replyText.length} caracteres):`, replyText.slice(0, 200));
+    }
 
     const { cleanText: sinDatos, datos: datosReserva } = extractReservaDatosMarker(replyText);
     const { cleanText, reservaConfirmada } = extractReservaMarker(sinDatos);
     const { cleanText: sinEnvio, direccionEnvio } = extractConsultaEnvioMarker(cleanText);
     const { cleanText: sinPedido, pedidoConfirmado } = extractPedidoMarker(sinEnvio);
     const { cleanText: sinDatosCliente, datosCliente } = extractClienteDatosMarker(sinPedido);
-    const { cleanText: cleanText2, datosPostulante } = extractPostulanteDatosMarker(sinDatosCliente);
+    const { cleanText: sinPostulante, datosPostulante } = extractPostulanteDatosMarker(sinDatosCliente);
+    const { cleanText: cleanText2, datosEspera } = extractListaEsperaMarker(sinPostulante);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
@@ -926,6 +1077,18 @@ app.post("/webhook", async (req, res) => {
 
     if (reservaConfirmada && config.grupoReservasWhatsappId) {
       await sendWhatsappText(config.grupoReservasWhatsappId, reservaConfirmada);
+    }
+
+    // Aviso individual al staff (alternativa que sí funciona con Cloud API, que no
+    // soporta mandar mensajes a grupos de WhatsApp reales).
+    if (reservaConfirmada && Array.isArray(config.avisosReservas)) {
+      const avisosActivos = config.avisosReservas.filter((a) => a.activo && a.telefono);
+      for (const aviso of avisosActivos) {
+        await sendWhatsappText(aviso.telefono, reservaConfirmada);
+      }
+      if (avisosActivos.length > 0) {
+        console.log(`Aviso de reserva confirmada enviado individualmente a ${avisosActivos.length} persona(s) del staff.`);
+      }
     }
 
     if (pedidoConfirmado) {
@@ -982,12 +1145,32 @@ app.post("/webhook", async (req, res) => {
         nombre: datosReserva.nombre || "",
         fecha: datosReserva.fecha,
         hora: datosReserva.hora,
+        sector: (datosReserva.sector || "").toLowerCase(),
         personas: datosReserva.personas || null,
         recordatorioEnviado: false,
         creadaEn: new Date().toISOString(),
       });
       saveReservas(reservas);
-      console.log(`Reserva guardada para recordatorio: ${datosReserva.nombre} - ${datosReserva.fecha} ${datosReserva.hora}`);
+      console.log(`Reserva guardada para recordatorio: ${datosReserva.nombre} - ${datosReserva.fecha} ${datosReserva.hora} (sector: ${datosReserva.sector || "sin especificar"})`);
+    }
+
+    // Si el cliente aceptó anotarse en la lista de espera porque no había mesas disponibles.
+    if (datosEspera && datosEspera.telefono) {
+      const listaEspera = loadListaEspera();
+      listaEspera.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+        telefono: from,
+        nombre: datosEspera.nombre || "",
+        sector: (datosEspera.sector || "").toLowerCase(),
+        fecha: datosEspera.fecha || "",
+        hora: datosEspera.hora || "",
+        personas: datosEspera.personas || null,
+        estado: "esperando",
+        notificado: false,
+        creadaEn: new Date().toISOString(),
+      });
+      saveListaEspera(listaEspera);
+      console.log(`Cliente anotado en lista de espera: ${datosEspera.nombre} — ${datosEspera.sector} ${datosEspera.fecha} ${datosEspera.hora}.`);
     }
 
     // Si Claude pidió consultar el costo de envío, le mandamos la consulta al primer cadete activo.
@@ -1283,6 +1466,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
           <a class="tile" href="/admin/inbox"><div class="tile-icono">💬</div><div class="tile-texto"><b>Atender manualmente</b><div class="tile-desc">Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</div></div></a>
           <a class="tile" href="/admin/clientes"><div class="tile-icono">👥</div><div class="tile-texto"><b>Clientes conocidos</b><div class="tile-desc">Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</div></div></a>
           <a class="tile" href="/admin/postulantes"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Postulantes / CVs</b><div class="tile-desc">Gente que dejó su CV, con puntaje automático según experiencia, formación y disponibilidad.</div></div></a>
+          <a class="tile" href="/admin/listaespera"><div class="tile-icono">⏳</div><div class="tile-texto"><b>Lista de espera de mesas</b><div class="tile-desc">Clientes esperando lugar cuando el sector está lleno — se les avisa solo por WhatsApp.</div></div></a>
           <a class="tile" href="/admin/inactivos"><div class="tile-icono">📉</div><div class="tile-texto"><b>Clientes inactivos</b><div class="tile-desc">Detecta clientes que dejaron de pedir y te avisa por WhatsApp.</div></div></a>
           <a class="tile" href="/admin/menu"><div class="tile-icono">📋</div><div class="tile-texto"><b>Actualizar el menú</b><div class="tile-desc">Subir un PDF nuevo con precios y productos.</div></div></a>
           <a class="tile" href="/admin/config"><div class="tile-icono">⚙️</div><div class="tile-texto"><b>Precios, horarios, promos y teléfonos</b><div class="tile-desc">Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</div></div></a>
@@ -1554,6 +1738,86 @@ app.get("/admin/postulantes/cv/:id", requireAdminPage, (req, res) => {
     return res.status(404).send("El archivo del CV ya no está disponible.");
   }
   res.sendFile(filePath);
+});
+
+// ==================== Lista de espera de mesas ====================
+app.get("/admin/listaespera", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Lista de espera</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .espera-nombre { font-weight: 700; font-size: 15px; }
+      .espera-tel { font-size: 12px; color: var(--texto-tenue); margin-top: 2px; }
+      .espera-detalle { font-size: 12.5px; margin-top: 8px; color: var(--texto-tenue); line-height: 1.5; }
+      .acciones { margin-top: 12px; display: flex; gap: 8px; }
+      .acciones a, .acciones button { font-size: 12px; text-decoration: none; border-radius: 8px; padding: 6px 11px; cursor: pointer; }
+      .acciones a { color: var(--turquesa); border: 1px solid var(--turquesa); background: transparent; }
+      .acciones a:hover { background: rgba(18,140,126,0.1); }
+      .acciones button { color: var(--coral); border: 1px solid var(--coral); background: transparent; margin-top: 0; }
+      .acciones button:hover { background: rgba(232,103,74,0.1); }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>⏳ Lista de espera de mesas</h1>',
+    '<p class="sub">Clientes que pidieron reservar en un sector sin lugar disponible. Cuando se libera una mesa, el sistema les avisa solo por WhatsApp.</p>',
+    '<div id="msg">Cargando...</div>',
+    '<div id="lista"></div>',
+    '<script>',
+    'function cargar() {',
+    '  fetch("/admin/listaespera-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      document.getElementById("msg").textContent = data.lista.length + " en espera.";',
+    '      pintar(data.lista);',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
+    '}',
+    'cargar();',
+    'function pintar(lista) {',
+    '  var cont = document.getElementById("lista");',
+    '  cont.innerHTML = "";',
+    '  var activos = lista.filter(function(e){ return e.estado === "esperando"; }).sort(function(a,b){ return new Date(a.creadaEn) - new Date(b.creadaEn); });',
+    '  if (activos.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">⏳</div>No hay nadie en lista de espera ahora mismo.</div>"; return; }',
+    '  activos.forEach(function(e) {',
+    '    var div = document.createElement("div");',
+    '    div.className = "card";',
+    '    var badge = e.notificado ? "<span class=\\"badge badge-alto\\">Avisado</span>" : "<span class=\\"badge badge-pendiente\\">Esperando</span>";',
+    '    div.innerHTML = "<span class=\\"espera-nombre\\">" + (e.nombre || "(sin nombre)") + "</span> " + badge +',
+    '      "<div class=\\"espera-tel\\">+" + e.telefono + "</div>" +',
+    '      "<div class=\\"espera-detalle\\">Sector: " + e.sector + " · " + e.fecha + " " + e.hora + "hs · " + (e.personas || "?") + " personas</div>" +',
+    '      "<div class=\\"acciones\\"><a href=\\"/admin/inbox?tel=" + e.telefono + "\\">Ir al chat</a><button data-id=\\"" + e.id + "\\">Quitar de la lista</button></div>";',
+    '    cont.appendChild(div);',
+    '  });',
+    '  Array.prototype.forEach.call(cont.querySelectorAll("button[data-id]"), function(btn) {',
+    '    btn.addEventListener("click", function() {',
+    '      fetch("/admin/listaespera-quitar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.getAttribute("data-id")})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargar(); });',
+    '    });',
+    '  });',
+    '}',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/listaespera-data", requireAdminApi, (_req, res) => {
+  res.json({ lista: loadListaEspera() });
+});
+
+app.post("/admin/listaespera-quitar", requireAdminApi, (req, res) => {
+  try {
+    const lista = loadListaEspera();
+    const actualizada = lista.filter((e) => e.id !== req.body.id);
+    saveListaEspera(actualizada);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al quitar de lista de espera:", err);
+    res.status(500).json({ error: "No se pudo quitar" });
+  }
 });
 
 // ==================== Bandeja de entrada manual (atender sin usar el celular) ====================
@@ -2213,5 +2477,45 @@ async function chequearOfertaCumpleañosProximo() {
 
 setInterval(chequearOfertaCumpleañosProximo, 5 * 60 * 1000); // cada 5 minutos
 setTimeout(chequearOfertaCumpleañosProximo, 25 * 1000); // primer chequeo a los 25seg de arrancar
+
+// ==================== Lista de espera de mesas: avisar cuando se libera un lugar ====================
+async function chequearListaEspera() {
+  try {
+    const listaEspera = loadListaEspera();
+    const pendientes = listaEspera.filter((e) => e.estado === "esperando" && !e.notificado);
+    if (pendientes.length === 0) return;
+
+    const config = loadConfig();
+    const reservas = loadReservas();
+    let huboCambios = false;
+
+    for (const espera of pendientes) {
+      if (!SECTORES_VALIDOS.includes(espera.sector) || !espera.fecha || !espera.hora) continue;
+      const disponibilidad = calcularDisponibilidad(config, reservas, espera.sector, espera.fecha, espera.hora);
+      if (disponibilidad.libres > 0) {
+        const nombre = espera.nombre ? espera.nombre.split(" ")[0] : "";
+        const mensaje =
+          `¡Buenas noticias${nombre ? ", " + nombre : ""}! 🎉 Se liberó una mesa en el sector ${espera.sector} para el ${espera.fecha} a las ${espera.hora}hs, justo lo que estabas esperando.\n\n` +
+          `¿Confirmamos tu reserva? Respondeme por acá así te la dejamos anotada — si no llego a tener noticias tuyas en un rato, se la ofrecemos a la siguiente persona en la lista.`;
+        const enviado = await sendWhatsappText(espera.telefono, mensaje);
+        if (enviado) {
+          espera.notificado = true;
+          espera.notificadoEn = new Date().toISOString();
+          huboCambios = true;
+          console.log(`Aviso de lista de espera enviado a ${espera.telefono} (${espera.nombre || "sin nombre"}, sector ${espera.sector}).`);
+        } else {
+          console.log(`No se pudo avisar a ${espera.telefono} de la lista de espera — se reintenta en el próximo chequeo.`);
+        }
+      }
+    }
+
+    if (huboCambios) saveListaEspera(listaEspera);
+  } catch (err) {
+    console.error("Error chequeando lista de espera de mesas:", err);
+  }
+}
+
+setInterval(chequearListaEspera, 15 * 60 * 1000); // cada 15 minutos
+setTimeout(chequearListaEspera, 30 * 1000); // primer chequeo a los 30seg de arrancar
 
 app.listen(PORT, () => console.log(`Chaparrita backend escuchando en el puerto ${PORT}`));
