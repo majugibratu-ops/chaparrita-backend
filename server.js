@@ -1214,26 +1214,35 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Actualizamos el perfil del cliente: datos nuevos que haya contado (nombre/cumpleaños) y su historial de pedidos.
-    if (datosCliente || pedidoConfirmado) {
+    // El nombre puede venir de la marca CLIENTE_DATOS, pero como respaldo (por si Claude se
+    // olvida de esa marca en medio de una charla larga) también aceptamos el nombre que venga
+    // de una reserva, un postulante o una lista de espera — esas marcas siempre piden el
+    // nombre completo, así que son una fuente confiable igual.
+    const nombreDetectado =
+      (datosCliente && datosCliente.nombre) ||
+      (datosReserva && datosReserva.nombre) ||
+      (datosPostulante && datosPostulante.nombre) ||
+      (datosEspera && datosEspera.nombre) ||
+      null;
+
+    if (datosCliente || pedidoConfirmado || nombreDetectado) {
       let cliente = buscarCliente(clientes, from);
       if (!cliente) {
         cliente = { telefono: from, nombre: "", cumpleanos: "", primeraVez: new Date().toISOString(), ultimaVez: new Date().toISOString(), cantidadPedidos: 0, historialPedidos: [], notas: "" };
         clientes.push(cliente);
       }
-      if (datosCliente) {
-        if (datosCliente.nombre) {
-          cliente.nombre = datosCliente.nombre;
-          // Actualizamos también el nombre en /admin/inbox al instante, sin esperar
-          // a que el cliente mande otro mensaje para que se refleje ahí.
-          const inboxActualizado = loadInbox();
-          const telInbox = soloDigitos(from);
-          if (inboxActualizado[telInbox]) {
-            inboxActualizado[telInbox].nombre = datosCliente.nombre;
-            saveInbox(inboxActualizado);
-          }
+      if (nombreDetectado) {
+        cliente.nombre = nombreDetectado;
+        // Actualizamos también el nombre en /admin/inbox al instante, sin esperar
+        // a que el cliente mande otro mensaje para que se refleje ahí.
+        const inboxActualizado = loadInbox();
+        const telInbox = soloDigitos(from);
+        if (inboxActualizado[telInbox]) {
+          inboxActualizado[telInbox].nombre = nombreDetectado;
+          saveInbox(inboxActualizado);
         }
-        if (datosCliente.cumpleanos) cliente.cumpleanos = datosCliente.cumpleanos;
       }
+      if (datosCliente && datosCliente.cumpleanos) cliente.cumpleanos = datosCliente.cumpleanos;
       if (pedidoConfirmado) {
         const itemsMatch = pedidoConfirmado.match(/Ítems:\s*(.+)/);
         cliente.historialPedidos = cliente.historialPedidos || [];
