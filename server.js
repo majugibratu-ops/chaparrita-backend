@@ -1084,7 +1084,12 @@ app.post("/webhook", async (req, res) => {
     if (reservaConfirmada && Array.isArray(config.avisosReservas)) {
       const avisosActivos = config.avisosReservas.filter((a) => a.activo && a.telefono);
       for (const aviso of avisosActivos) {
-        await sendWhatsappText(aviso.telefono, reservaConfirmada);
+        const telLimpio = soloDigitos(aviso.telefono);
+        if (telLimpio && telLimpio.length >= 10) {
+          await sendWhatsappText(telLimpio, reservaConfirmada);
+        } else {
+          console.log(`Aviso de reserva: el teléfono de "${aviso.nombre}" no es válido (${aviso.telefono}), se saltea.`);
+        }
       }
       if (avisosActivos.length > 0) {
         console.log(`Aviso de reserva confirmada enviado individualmente a ${avisosActivos.length} persona(s) del staff.`);
