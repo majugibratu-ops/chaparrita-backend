@@ -2020,6 +2020,11 @@ app.get("/admin/clientes", requireAdminPage, (_req, res) => {
       .cliente-tel { font-size: 12px; color: var(--texto-tenue); margin-top: 2px; }
       .cliente-detalle { font-size: 12.5px; margin-top: 8px; color: var(--texto-tenue); line-height: 1.5; }
       .cumple-badge { display: inline-block; background: rgba(232,103,74,0.15); color: var(--coral); border-radius: 12px; padding: 2px 9px; font-size: 11px; font-weight: 700; margin-left: 8px; }
+      .cliente-editar { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: flex-end; }
+      .cliente-editar div { flex: 1; min-width: 110px; }
+      .cliente-editar label { margin-top: 0; }
+      .cliente-editar input[type=text] { margin-top: 4px; }
+      .cliente-editar button { margin-top: 0; white-space: nowrap; }
     </style>`,
     '</head><body>',
     '<div class="contenedor">',
@@ -2088,7 +2093,22 @@ app.get("/admin/clientes", requireAdminPage, (_req, res) => {
     '    }',
     '    div.innerHTML = "<span class=\\"cliente-nombre\\">" + (c.nombre || "(sin nombre)") + "</span>" + etiquetaCumple +',
     '      "<div class=\\"cliente-tel\\">+" + c.telefono + "</div>" +',
-    '      "<div class=\\"cliente-detalle\\">Pedidos: " + (c.cantidadPedidos||0) + " · Últimos: " + pedidos + "</div>";',
+    '      "<div class=\\"cliente-detalle\\">Pedidos: " + (c.cantidadPedidos||0) + " · Últimos: " + pedidos + "</div>" +',
+    '      "<div class=\\"cliente-editar\\">" +',
+    '      "<div><label>Nombre</label><input type=\\"text\\" data-campo=\\"nombre\\" value=\\"" + (c.nombre || "").replace(/"/g,"&quot;") + "\\" /></div>" +',
+    '      "<div><label>Cumpleaños (DD-MM)</label><input type=\\"text\\" data-campo=\\"cumpleanos\\" placeholder=\\"ej: 15-03\\" value=\\"" + (c.cumpleanos || "") + "\\" /></div>" +',
+    '      "<button class=\\"btn-secondary\\" data-accion=\\"guardar\\">Guardar</button>" +',
+    '      "</div>";',
+    '    div.querySelector("[data-accion=guardar]").addEventListener("click", function(){',
+    '      var nombreNuevo = div.querySelector("[data-campo=nombre]").value;',
+    '      var cumpleNuevo = div.querySelector("[data-campo=cumpleanos]").value;',
+    '      var btn = div.querySelector("[data-accion=guardar]");',
+    '      btn.textContent = "Guardando...";',
+    '      fetch("/admin/clientes-guardar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telefono: c.telefono, campos: {nombre: nombreNuevo, cumpleanos: cumpleNuevo}})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ btn.textContent = "¡Guardado!"; setTimeout(cargar, 700); })',
+    '        .catch(function(){ btn.textContent = "Error"; });',
+    '    });',
     '    cont.appendChild(div);',
     '  });',
     '  if (ordenados.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">👥</div>No hay clientes que coincidan.</div>"; }',
@@ -2102,6 +2122,33 @@ app.get("/admin/clientes", requireAdminPage, (_req, res) => {
 
 app.post("/admin/clientes-data", requireAdminApi, (req, res) => {
   res.json(loadClientes());
+});
+
+app.post("/admin/clientes-guardar", requireAdminApi, (req, res) => {
+  try {
+    const clientes = loadClientes();
+    const cliente = clientes.find((c) => soloDigitos(c.telefono) === soloDigitos(req.body.telefono));
+    if (!cliente) return res.status(404).json({ error: "Cliente no encontrado" });
+    const campos = req.body.campos || {};
+    if (typeof campos.nombre === "string") cliente.nombre = campos.nombre;
+    if (typeof campos.cumpleanos === "string") cliente.cumpleanos = campos.cumpleanos;
+    saveClientes(clientes);
+
+    // Reflejamos el nombre también en /admin/inbox al instante, igual que hace el bot.
+    if (campos.nombre) {
+      const inbox = loadInbox();
+      const tel = soloDigitos(req.body.telefono);
+      if (inbox[tel]) {
+        inbox[tel].nombre = campos.nombre;
+        saveInbox(inbox);
+      }
+    }
+    console.log(`Cliente ${req.body.telefono} editado manualmente desde /admin/clientes.`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al guardar cliente:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
 });
 
 // ==================== Postulantes / CVs ====================

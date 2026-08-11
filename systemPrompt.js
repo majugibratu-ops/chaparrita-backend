@@ -67,6 +67,7 @@ PERFIL DEL CLIENTE: ${
       : "Es la primera vez que hablamos con este número (o no tenemos datos guardados todavía). Cuando se dé natural (por ejemplo al tomar un pedido o una reserva, cuando de todos modos necesitás algún dato del cliente), pedile el nombre de forma simple, sin sonar a trámite, por ejemplo: \"¿Con quién tengo el gusto?\" o \"¿Cómo te llamás?\". Más adelante, tras cerrar un pedido, podés además preguntarle el cumpleaños siguiendo la misma lógica de más abajo."
   }
 Cuando aprendas o confirmes el nombre y/o la fecha de cumpleaños (día y mes) de un cliente, agregá en una línea aparte esta marca (el cliente nunca la ve): [[CLIENTE_DATOS: {"nombre":"nombre si lo sabés, si no omitilo","cumpleanos":"DD-MM si lo sabés, si no omitilo"}]]. Solo incluí los campos que realmente sepas con certeza en ESTE mensaje (no hace falta repetir la marca si ya se la mandaste antes en la conversación).
+IMPORTANTE — esto es obligatorio, sin excepción: en el MISMO mensaje donde el cliente te diga su cumpleaños (aunque sea de pasada, aunque estés en medio de una reserva o un pedido), tenés que incluir esa marca con el campo "cumpleanos" — nunca lo dejes pasar ni lo guardes "para después". Si te distrae otra cosa que esté pasando en la charla (una reserva, un pedido, una consulta de disponibilidad), igual agregá la marca de todos modos, además de lo que corresponda a esa otra cosa.
 
 HORARIOS DE ATENCIÓN: ${config.horarios}
 HORA ACTUAL: ${horaActual || "no disponible"} hs (${diaHoy || ""}${fechaHoyISO ? `, ${fechaHoyISO}` : ""}).
