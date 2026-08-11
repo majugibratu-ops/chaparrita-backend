@@ -142,6 +142,43 @@ function extractListaEsperaMarker(text) {
   }
 }
 
+// Saca la marca interna [[CONSULTAR_MIS_RESERVAS]] (sin datos, el sistema ya sabe el teléfono)
+function extractConsultarReservasMarker(text) {
+  const marker = "[[CONSULTAR_MIS_RESERVAS]]";
+  const idx = text.indexOf(marker);
+  if (idx === -1) return { cleanText: text, quiereConsultarReservas: false };
+  const cleanText = (text.slice(0, idx) + text.slice(idx + marker.length)).trim();
+  return { cleanText, quiereConsultarReservas: true };
+}
+
+// Saca la marca interna [[ACTUALIZAR_RESERVA: {...}]] y devuelve el texto limpio + los cambios
+function extractActualizarReservaMarker(text) {
+  const regex = /\[\[ACTUALIZAR_RESERVA:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, actualizacion: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, actualizacion: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear ACTUALIZAR_RESERVA:", match[1]);
+    return { cleanText, actualizacion: null };
+  }
+}
+
+// Saca la marca interna [[CANCELAR_RESERVA: {"id":"..."}]] y devuelve el texto limpio + el id
+function extractCancelarReservaMarker(text) {
+  const regex = /\[\[CANCELAR_RESERVA:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, cancelacion: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, cancelacion: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear CANCELAR_RESERVA:", match[1]);
+    return { cleanText, cancelacion: null };
+  }
+}
+
 // ---- Lista de espera (cuando no hay mesas disponibles en el sector/horario pedido) ----
 const LISTA_ESPERA_PATH = path.join(DATA_DIR, "listaEspera.json");
 function loadListaEspera() {
@@ -1105,13 +1142,39 @@ app.post("/webhook", async (req, res) => {
       console.log(`Respuesta de Claude tras consultar disponibilidad (${replyText.length} caracteres):`, replyText.slice(0, 200));
     }
 
+    // Si Claude quiere ver las reservas que ya tiene cargadas este cliente (para
+    // confirmarle si están hechas, o para poder modificarlas/cancelarlas), se las
+    // pasamos al instante, en el mismo ida y vuelta que la disponibilidad de mesas.
+    const { cleanText: sinConsultaReservas, quiereConsultarReservas } = extractConsultarReservasMarker(replyText);
+    if (quiereConsultarReservas) {
+      const reservasCliente = loadReservas()
+        .filter((r) => soloDigitos(r.telefono) === soloDigitos(from))
+        .map((r) => ({ id: r.id, fecha: r.fecha, hora: r.hora, personas: r.personas, sector: r.sector }));
+      console.log(`Cliente ${from} consultó sus reservas — se encontraron ${reservasCliente.length}.`);
+
+      if (sinConsultaReservas) {
+        history.push({ role: "assistant", content: [{ type: "text", text: sinConsultaReservas }] });
+      }
+      history.push({
+        role: "user",
+        content: [{
+          type: "text",
+          text: `[[DATOS_MIS_RESERVAS: ${JSON.stringify(reservasCliente)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es la lista real de sus reservas cargadas, con el "id" de cada una para poder modificarla o cancelarla si lo pide. Si la lista está vacía, es que no tiene ninguna reserva cargada. Usalo para responder de forma natural.)`,
+        }],
+      });
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
+      console.log(`Respuesta de Claude tras consultar reservas del cliente (${replyText.length} caracteres):`, replyText.slice(0, 200));
+    }
+
     const { cleanText: sinDatos, datos: datosReserva } = extractReservaDatosMarker(replyText);
     const { cleanText, reservaConfirmada } = extractReservaMarker(sinDatos);
     const { cleanText: sinEnvio, direccionEnvio } = extractConsultaEnvioMarker(cleanText);
     const { cleanText: sinPedido, pedidoConfirmado } = extractPedidoMarker(sinEnvio);
     const { cleanText: sinDatosCliente, datosCliente } = extractClienteDatosMarker(sinPedido);
     const { cleanText: sinPostulante, datosPostulante } = extractPostulanteDatosMarker(sinDatosCliente);
-    const { cleanText: cleanText2, datosEspera } = extractListaEsperaMarker(sinPostulante);
+    const { cleanText: sinEspera, datosEspera } = extractListaEsperaMarker(sinPostulante);
+    const { cleanText: sinActualizacion, actualizacion } = extractActualizarReservaMarker(sinEspera);
+    const { cleanText: cleanText2, cancelacion } = extractCancelarReservaMarker(sinActualizacion);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
@@ -1230,6 +1293,37 @@ app.post("/webhook", async (req, res) => {
       });
       saveListaEspera(listaEspera);
       console.log(`Cliente anotado en lista de espera: ${datosEspera.nombre} — ${datosEspera.sector} ${datosEspera.fecha} ${datosEspera.hora}.`);
+    }
+
+    // Si el cliente pidió modificar una reserva ya cargada (solo puede tocar las suyas,
+    // verificamos que el teléfono coincida antes de aplicar cualquier cambio).
+    if (actualizacion && actualizacion.id) {
+      const reservasParaEditar = loadReservas();
+      const reservaAEditar = reservasParaEditar.find((r) => r.id === actualizacion.id && soloDigitos(r.telefono) === soloDigitos(from));
+      if (reservaAEditar) {
+        const cambioFechaUHora = (actualizacion.fecha && actualizacion.fecha !== reservaAEditar.fecha) || (actualizacion.hora && actualizacion.hora !== reservaAEditar.hora);
+        if (actualizacion.fecha) reservaAEditar.fecha = actualizacion.fecha;
+        if (actualizacion.hora) reservaAEditar.hora = actualizacion.hora;
+        if (actualizacion.personas) reservaAEditar.personas = Number(actualizacion.personas);
+        if (actualizacion.sector) reservaAEditar.sector = actualizacion.sector.toLowerCase();
+        if (cambioFechaUHora) reservaAEditar.recordatorioEnviado = false; // para que el recordatorio salga en el nuevo horario
+        saveReservas(reservasParaEditar);
+        console.log(`Reserva ${reservaAEditar.id} actualizada por el cliente: ${JSON.stringify(actualizacion)}`);
+      } else {
+        console.log(`El cliente ${from} pidió actualizar la reserva ${actualizacion.id}, pero no se encontró o no le pertenece.`);
+      }
+    }
+
+    // Si el cliente pidió cancelar una reserva ya cargada (misma verificación de seguridad).
+    if (cancelacion && cancelacion.id) {
+      const reservasParaCancelar = loadReservas();
+      const existiaYEraDelCliente = reservasParaCancelar.some((r) => r.id === cancelacion.id && soloDigitos(r.telefono) === soloDigitos(from));
+      if (existiaYEraDelCliente) {
+        saveReservas(reservasParaCancelar.filter((r) => r.id !== cancelacion.id));
+        console.log(`Reserva ${cancelacion.id} cancelada por el cliente ${from}.`);
+      } else {
+        console.log(`El cliente ${from} pidió cancelar la reserva ${cancelacion.id}, pero no se encontró o no le pertenece.`);
+      }
     }
 
     // Si Claude pidió consultar el costo de envío, le mandamos la consulta al primer cadete activo.
