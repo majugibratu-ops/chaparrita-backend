@@ -2649,9 +2649,15 @@ app.get("/admin/compras", requireAdminPage, (_req, res) => {
       .rol-item button { margin-top: 0; padding: 5px 9px; font-size: 11.5px; background: transparent; color: var(--coral); border: 1px solid var(--coral); border-radius: 6px; cursor: pointer; flex-shrink: 0; }
       .rol-item button:hover { background: rgba(232,103,74,0.1); }
       .agregar-item-row { display: flex; gap: 8px; margin-top: 10px; }
-      .agregar-item-row input[type=text] { margin-top: 0; flex: 1; }
-      .agregar-item-row select { margin-top: 0; }
-      .agregar-item-row button { margin-top: 0; white-space: nowrap; }
+      .agregar-item-row input[type=text] { margin-top: 0; flex: 1 1 auto; min-width: 0; width: auto; }
+      .agregar-item-row select { margin-top: 0; flex: 0 0 auto; width: auto; max-width: 130px; }
+      .agregar-item-row button { margin-top: 0; white-space: nowrap; flex: 0 0 auto; }
+      @media (max-width: 480px) {
+        .agregar-item-row { flex-wrap: wrap; }
+        .agregar-item-row input[type=text] { flex: 1 1 100%; }
+        .agregar-item-row select { flex: 1 1 auto; max-width: none; }
+        .agregar-item-row button { flex: 1 1 auto; }
+      }
       .estado-envios { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     </style>`,
     '</head><body>',
