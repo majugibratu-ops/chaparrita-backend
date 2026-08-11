@@ -179,6 +179,29 @@ function extractCancelarReservaMarker(text) {
   }
 }
 
+// Saca la marca interna [[CONSULTAR_LISTA_COMPRAS]] (sin datos, solo la pide el dueño)
+function extractConsultarListaComprasMarker(text) {
+  const marker = "[[CONSULTAR_LISTA_COMPRAS]]";
+  const idx = text.indexOf(marker);
+  if (idx === -1) return { cleanText: text, quiereListaCompras: false };
+  const cleanText = (text.slice(0, idx) + text.slice(idx + marker.length)).trim();
+  return { cleanText, quiereListaCompras: true };
+}
+
+// Saca la marca interna [[MARCAR_COMPRADO: {"ids": [...]}]] y devuelve el texto limpio + los ids
+function extractMarcarCompradoMarker(text) {
+  const regex = /\[\[MARCAR_COMPRADO:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, marcarComprado: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, marcarComprado: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear MARCAR_COMPRADO:", match[1]);
+    return { cleanText, marcarComprado: null };
+  }
+}
+
 // ---- Lista de espera (cuando no hay mesas disponibles en el sector/horario pedido) ----
 const LISTA_ESPERA_PATH = path.join(DATA_DIR, "listaEspera.json");
 function loadListaEspera() {
@@ -190,6 +213,137 @@ function loadListaEspera() {
 }
 function saveListaEspera(lista) {
   fs.writeFileSync(LISTA_ESPERA_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
+// ---- Lista de compras diaria (cocina + barra + salón mandan su pedido, se consolida y
+//      se le manda al dueño cuando lo pide, marcando qué falta comprar) ----
+const LISTA_COMPRAS_PATH = path.join(DATA_DIR, "listaCompras.json");
+const ROLES_COMPRAS = ["cocina", "barra", "salon"];
+
+function listaComprasVacia(fechaISO) {
+  return {
+    fecha: fechaISO,
+    envios: {
+      cocina: { recibido: false, textoOriginal: "" },
+      barra: { recibido: false, textoOriginal: "" },
+      salon: { recibido: false, textoOriginal: "" },
+    },
+    items: [], // {id, texto, categoria, comprado, origen}
+  };
+}
+
+function loadListaCompras(fechaHoyISO) {
+  let datos;
+  try {
+    datos = JSON.parse(fs.readFileSync(LISTA_COMPRAS_PATH, "utf8"));
+  } catch {
+    datos = listaComprasVacia(fechaHoyISO);
+  }
+  // Si la lista guardada es de un día anterior, arrancamos de cero automáticamente.
+  if (datos.fecha !== fechaHoyISO) {
+    datos = listaComprasVacia(fechaHoyISO);
+  }
+  return datos;
+}
+
+function saveListaCompras(datos) {
+  fs.writeFileSync(LISTA_COMPRAS_PATH, JSON.stringify(datos, null, 2), "utf8");
+}
+
+// A qué rol de compras corresponde un teléfono dado (cocina / barra / salon=cajera), o null.
+function rolDeComprasSegunTelefono(config, telefono) {
+  const staff = config.staff || {};
+  const tel = soloDigitos(telefono);
+  if (staff.cocina && soloDigitos(staff.cocina.telefono) === tel) return "cocina";
+  if (staff.barra && soloDigitos(staff.barra.telefono) === tel) return "barra";
+  if (staff.cajera && soloDigitos(staff.cajera.telefono) === tel) return "salon";
+  return null;
+}
+
+// Arma el texto del mensaje con la lista de compras pendiente (lo que todavía no se compró).
+function construirMensajeListaCompras(items, rolesFaltantes) {
+  const pendientes = items.filter((i) => !i.comprado);
+  if (pendientes.length === 0 && rolesFaltantes.length === 0) {
+    return "🛒 No queda nada pendiente en la lista de compras — ¡ya está todo comprado! 🎉";
+  }
+  const porCategoria = {};
+  pendientes.forEach((item) => {
+    const cat = item.categoria || "Otros";
+    if (!porCategoria[cat]) porCategoria[cat] = [];
+    porCategoria[cat].push(item.texto);
+  });
+
+  let mensaje = "🛒 *Lista de compras pendiente*\n";
+  Object.keys(porCategoria).forEach((cat) => {
+    mensaje += `\n*${cat}*\n`;
+    porCategoria[cat].forEach((texto) => {
+      mensaje += `· ${texto}\n`;
+    });
+  });
+
+  const NOMBRES_ROL = { cocina: "Cocina", barra: "Barra", salon: "Salón" };
+  if (rolesFaltantes.length > 0) {
+    mensaje += `\n⚠️ Todavía no llegó el pedido de: ${rolesFaltantes.map((r) => NOMBRES_ROL[r]).join(", ")}. Les mandé un mensaje pidiéndoselo.`;
+  }
+  return mensaje;
+}
+
+// Llamada aparte a Claude (no es parte de la charla con el dueño) para organizar los
+// pedidos sueltos de cocina/barra/salón en una sola lista, por categoría de comercio.
+const LISTA_COMPRAS_SYSTEM_PROMPT = `Sos un asistente que organiza listas de compras para un restaurante bar mexicano en Formosa, Argentina. Te paso los pedidos de compra que mandaron por separado el encargado de cocina, el de barra y la encargada de salón para el día siguiente. Tu trabajo es unificarlos en una sola lista organizada por categoría de comercio (por ejemplo: Verdulería, Fiambres, Super, Carnicería, Bebidas, Otros — usá las categorías que correspondan según los productos reales, no inventes categorías vacías).
+
+Reglas importantes:
+- NUNCA inventes ni agregues productos que no estén en los pedidos originales.
+- Si el mismo producto aparece en más de un pedido, sumalos en una sola línea con la cantidad total si podés calcularla con certeza; si no está claro cómo sumarlos, dejalos como líneas separadas.
+- Mantené las cantidades y unidades tal como las escribieron, no las inventes ni las cambies.
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown, sin \`\`\`), con esta forma exacta:
+{"items": [{"texto": "1 bolsa de papa", "categoria": "Verdulería"}, {"texto": "cheddar feta", "categoria": "Fiambres"}]}`;
+
+async function consolidarListaCompras(envios) {
+  const partes = [];
+  if (envios.cocina.recibido) partes.push(`Pedido de COCINA:\n${envios.cocina.textoOriginal}`);
+  if (envios.barra.recibido) partes.push(`Pedido de BARRA:\n${envios.barra.textoOriginal}`);
+  if (envios.salon.recibido) partes.push(`Pedido de SALÓN:\n${envios.salon.textoOriginal}`);
+  if (partes.length === 0) return [];
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1200,
+        system: LISTA_COMPRAS_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: partes.join("\n\n") }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al consolidar lista de compras:", data);
+      return [];
+    }
+    const textoRespuesta = (data.content || [])
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim()
+      .replace(/^```json\s*|\s*```$/g, "");
+    const parsed = JSON.parse(textoRespuesta);
+    return (parsed.items || []).map((item) => ({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      texto: item.texto,
+      categoria: item.categoria || "Otros",
+      comprado: false,
+    }));
+  } catch (err) {
+    console.error("Error consolidando lista de compras:", err);
+    return [];
+  }
 }
 
 // ---- Perfiles de clientes (nombre, cumpleaños, historial de pedidos) ----
@@ -607,10 +761,13 @@ const ADMIN_CONFIG_PAGE = [
   '  var duenoNombre = textInput(stf.due\u00f1o.nombre), duenoTel = textInput(stf.due\u00f1o.telefono);',
   '  var cocinaObj = stf.cocina || {nombre:"", telefono:""};',
   '  var cocinaNombre = textInput(cocinaObj.nombre), cocinaTel = textInput(cocinaObj.telefono);',
-  '  area.appendChild(el("div", {class:"row"}, [field("Nombre cajera/o", cajNombre), field("Telefono (con 549...)", cajTel)]));',
+  '  var barraObj = stf.barra || {nombre:"", telefono:""};',
+  '  var barraNombre = textInput(barraObj.nombre), barraTel = textInput(barraObj.telefono);',
+  '  area.appendChild(el("div", {class:"row"}, [field("Nombre cajera/o (tambi\u00e9n encargada de sal\u00f3n)", cajNombre), field("Telefono (con 549...)", cajTel)]));',
   '  area.appendChild(el("div", {class:"row"}, [field("Nombre dueno/a", duenoNombre), field("Telefono (con 549...)", duenoTel)]));',
   '  area.appendChild(el("div", {class:"row"}, [field("Nombre jefe de cocina", cocinaNombre), field("Telefono (con 549...)", cocinaTel)]));',
-  '  area.appendChild(el("p", {text:"A cocina se le reenvia automaticamente el resumen apenas se confirma un pedido.", style:"font-size:12px;color:#6b6258;margin:2px 0 0 0;"}));',
+  '  area.appendChild(el("div", {class:"row"}, [field("Nombre encargado/a de barra", barraNombre), field("Telefono (con 549...)", barraTel)]));',
+  '  area.appendChild(el("p", {text:"A cocina se le reenvia automaticamente el resumen apenas se confirma un pedido. Cocina, barra y sal\u00f3n (cajera) son quienes mandan su lista de compras diaria.", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 0 0;"}));',
   '',
   '  var grupoInput = textInput(cfg.grupoReservasWhatsappId);',
   '  area.appendChild(field("ID de WhatsApp del grupo Reservas Chaparrita", grupoInput));',
@@ -756,6 +913,31 @@ const ADMIN_CONFIG_PAGE = [
   '  });',
   '  area.appendChild(promosDiaBox);',
   '',
+  '  area.appendChild(el("h2", {text:"Base de conocimiento"}));',
+  '  area.appendChild(el("p", {text:"Preguntas puntuales que quer\u00e9s que Chaparrita responda siempre de la misma forma (ej: \u00bftienen productos para cel\u00edacos? \u00bfc\u00f3mo es lo de tacos libres, es sin l\u00edmite?). El agente las va a seguir al pie de la letra.", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var conocimientoBox = el("div", {id:"conocimientoBox"});',
+  '  var conocimientoList = JSON.parse(JSON.stringify(cfg.baseConocimiento || []));',
+  '  function pintarConocimiento() {',
+  '    conocimientoBox.innerHTML = "";',
+  '    conocimientoList.forEach(function(item, idx) {',
+  '      var preguntaI = textInput(item.pregunta); preguntaI.oninput = function(){ item.pregunta = preguntaI.value; };',
+  '      var respuestaI = taInput(item.respuesta); respuestaI.oninput = function(){ item.respuesta = respuestaI.value; };',
+  '      var btnDel = el("button", {type:"button", text:"Eliminar", class:"btn-danger"});',
+  '      btnDel.addEventListener("click", function(){ conocimientoList.splice(idx,1); pintarConocimiento(); });',
+  '      var card = el("div", {class:"card"}, [',
+  '        field("Pregunta o tema", preguntaI),',
+  '        field("Respuesta exacta que debe dar", respuestaI),',
+  '        btnDel',
+  '      ]);',
+  '      conocimientoBox.appendChild(card);',
+  '    });',
+  '  }',
+  '  pintarConocimiento();',
+  '  area.appendChild(conocimientoBox);',
+  '  var btnAddConocimiento = el("button", {type:"button", text:"+ Agregar pregunta", class:"btn-secondary"});',
+  '  btnAddConocimiento.addEventListener("click", function(){ conocimientoList.push({pregunta:"", respuesta:""}); pintarConocimiento(); });',
+  '  area.appendChild(btnAddConocimiento);',
+  '',
   '  var btnGuardar = el("button", {type:"button", text:"Guardar todos los cambios", class:"btn-primary"});',
   '  btnGuardar.style.marginTop = "24px";',
   '  btnGuardar.style.width = "100%";',
@@ -773,7 +955,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo["cumplea\u00f1os"].descuentoPresupuestoAMedida = Number(descuentoInput.value) / 100;',
   '    nuevo["cumplea\u00f1os"].se\u00f1aPorcentaje = Number(senaInput.value) / 100;',
   '    nuevo["cumplea\u00f1os"].cuenta = {titular: ctTitular.value, cuit: ctCuit.value, cvu: ctCvu.value, alias: ctAlias.value};',
-  '    nuevo.staff = {cajera:{nombre:cajNombre.value, telefono:cajTel.value}, due\u00f1o:{nombre:duenoNombre.value, telefono:duenoTel.value}, cocina:{nombre:cocinaNombre.value, telefono:cocinaTel.value}};',
+  '    nuevo.staff = {cajera:{nombre:cajNombre.value, telefono:cajTel.value}, due\u00f1o:{nombre:duenoNombre.value, telefono:duenoTel.value}, cocina:{nombre:cocinaNombre.value, telefono:cocinaTel.value}, barra:{nombre:barraNombre.value, telefono:barraTel.value}};',
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
   '    nuevo.deliveryConfig = cadetesList;',
   '    nuevo.avisosReservas = avisosList;',
@@ -782,6 +964,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo["cumplea\u00f1osCliente"] = {activo: cumpleCliActivo.checked, descuentoPorcentaje: Number(cumpleCliDesc.value), shotsTequilaSiFestejaEnLocal: cumpleCliShots.checked};',
   '    nuevo.avisoCumpleañosDiario = {activo: avisoCumpleActivo.checked, telefono: avisoCumpleTel.value, hora: avisoCumpleHora.value};',
   '    nuevo.promosDia = promosDiaData;',
+  '    nuevo.baseConocimiento = conocimientoList;',
   '    document.getElementById("msg").textContent = "Guardando...";',
   '    document.getElementById("msg").className = "";',
   '    fetch("/admin/config-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({config: nuevo})})',
@@ -1015,6 +1198,21 @@ app.post("/webhook", async (req, res) => {
       // normal (por si el staff quiere probar el bot o hablar como cualquier cliente).
     }
 
+    // ¿Este mensaje viene de cocina, barra o salón (cajera)? Si es así, y no era sobre un
+    // comprobante (ya se manejó arriba), lo tratamos como su pedido de compras del día —
+    // no pasa por Claude, se guarda tal cual para consolidarlo después.
+    const rolCompras = rolDeComprasSegunTelefono(config, from);
+    if (rolCompras && message.type === "text") {
+      const fechaHoyCompras = fechaDeHoyISOArgentina();
+      const listaCompras = loadListaCompras(fechaHoyCompras);
+      listaCompras.envios[rolCompras] = { recibido: true, textoOriginal: message.text.body };
+      saveListaCompras(listaCompras);
+      agregarMensajeInbox(from, "cliente", message.text.body, (staffConfig[rolCompras === "salon" ? "cajera" : rolCompras] || {}).nombre);
+      console.log(`Pedido de compras recibido de ${rolCompras} (${from}).`);
+      await sendWhatsappText(from, "¡Recibido! 📝 Ya anoté tu pedido de compras para hoy, gracias 🙌");
+      return;
+    }
+
     // ¿Hay un postulante esperando mandar su CV en este número, y este mensaje es
     // una imagen o un documento (PDF)? Si es así, lo tratamos como el CV — guardamos
     // el archivo, lo evaluamos con IA, y confirmamos la recepción. No pasa por Claude
@@ -1110,7 +1308,8 @@ app.post("/webhook", async (req, res) => {
     const promosHoy = (config.promosDia && config.promosDia[diaHoy]) ? config.promosDia[diaHoy].filter((p) => p.activa) : [];
     const clientes = loadClientes();
     const perfilCliente = buscarCliente(clientes, from) || null;
-    let replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
+    const esDueño = !!(staffConfig.dueño && staffConfig.dueño.telefono && soloDigitos(staffConfig.dueño.telefono) === soloDigitos(from));
+    let replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
     console.log(`Respuesta de Claude generada (${replyText.length} caracteres):`, replyText.slice(0, 200));
 
     // Si Claude necesita saber la disponibilidad real de mesas para seguir la reserva,
@@ -1138,7 +1337,7 @@ app.post("/webhook", async (req, res) => {
           text: `[[DATOS_DISPONIBILIDAD: ${JSON.stringify(disponibilidad)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es el resultado de la consulta de disponibilidad que pediste. Usalo para responder de forma natural y seguir la conversación con el cliente.)`,
         }],
       });
-      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
       console.log(`Respuesta de Claude tras consultar disponibilidad (${replyText.length} caracteres):`, replyText.slice(0, 200));
     }
 
@@ -1162,8 +1361,56 @@ app.post("/webhook", async (req, res) => {
           text: `[[DATOS_MIS_RESERVAS: ${JSON.stringify(reservasCliente)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es la lista real de sus reservas cargadas, con el "id" de cada una para poder modificarla o cancelarla si lo pide. Si la lista está vacía, es que no tiene ninguna reserva cargada. Usalo para responder de forma natural.)`,
         }],
       });
-      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente);
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
       console.log(`Respuesta de Claude tras consultar reservas del cliente (${replyText.length} caracteres):`, replyText.slice(0, 200));
+    }
+
+    // Si el dueño pidió el resumen (o el estado) de la lista de compras del día, la
+    // consolidamos (si hace falta), le avisamos a quien todavía no mandó su pedido, y le
+    // devolvemos el detalle real — nunca inventado — para que Claude arme la respuesta.
+    const { cleanText: sinConsultaCompras, quiereListaCompras } = extractConsultarListaComprasMarker(replyText);
+    if (quiereListaCompras) {
+      const fechaHoyCompras = fechaDeHoyISOArgentina();
+      const listaCompras = loadListaCompras(fechaHoyCompras);
+
+      if (listaCompras.items.length === 0) {
+        const nuevosItems = await consolidarListaCompras(listaCompras.envios);
+        if (nuevosItems.length > 0) {
+          listaCompras.items = nuevosItems;
+          saveListaCompras(listaCompras);
+        }
+      }
+
+      const rolesFaltantes = ROLES_COMPRAS.filter((r) => !listaCompras.envios[r].recibido);
+      const NOMBRES_ROL_STAFF = { cocina: "cocina", barra: "barra", salon: "cajera" };
+      for (const rol of rolesFaltantes) {
+        const staffDelRol = staffConfig[NOMBRES_ROL_STAFF[rol]];
+        const telRol = staffDelRol && soloDigitos(staffDelRol.telefono);
+        if (telRol && telRol.length >= 10) {
+          await sendWhatsappText(telRol, "¡Hola! 👋 Necesitamos tu lista de compras para hoy — ¿nos la mandás por acá cuando puedas? 🙏");
+        }
+      }
+      if (rolesFaltantes.length > 0) {
+        console.log(`Lista de compras: se pidió el pedido a los roles faltantes: ${rolesFaltantes.join(", ")}.`);
+      }
+
+      // Mandamos la lista con el formato prolijo (por categoría) como mensaje aparte,
+      // así el dueño siempre la recibe bien armada, sin depender de cómo la redacte Claude.
+      await sendWhatsappText(from, construirMensajeListaCompras(listaCompras.items, rolesFaltantes));
+      agregarMensajeInbox(from, "chaparrita", construirMensajeListaCompras(listaCompras.items, rolesFaltantes));
+
+      if (sinConsultaCompras) {
+        history.push({ role: "assistant", content: [{ type: "text", text: sinConsultaCompras }] });
+      }
+      history.push({
+        role: "user",
+        content: [{
+          type: "text",
+          text: `[[DATOS_LISTA_COMPRAS: ${JSON.stringify({ items: listaCompras.items, rolesFaltantes })}]] (Esto es información interna del sistema, no un mensaje real del cliente — es la lista de compras real de hoy, con el "id" de cada ítem para poder marcarlo como comprado si el dueño lo pide. "comprado":true significa que ya se compró. Usalo para responder de forma natural.)`,
+        }],
+      });
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
+      console.log(`Respuesta de Claude tras consultar lista de compras (${replyText.length} caracteres):`, replyText.slice(0, 200));
     }
 
     const { cleanText: sinDatos, datos: datosReserva } = extractReservaDatosMarker(replyText);
@@ -1174,7 +1421,8 @@ app.post("/webhook", async (req, res) => {
     const { cleanText: sinPostulante, datosPostulante } = extractPostulanteDatosMarker(sinDatosCliente);
     const { cleanText: sinEspera, datosEspera } = extractListaEsperaMarker(sinPostulante);
     const { cleanText: sinActualizacion, actualizacion } = extractActualizarReservaMarker(sinEspera);
-    const { cleanText: cleanText2, cancelacion } = extractCancelarReservaMarker(sinActualizacion);
+    const { cleanText: sinCancelacion, cancelacion } = extractCancelarReservaMarker(sinActualizacion);
+    const { cleanText: cleanText2, marcarComprado } = extractMarcarCompradoMarker(sinCancelacion);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
@@ -1335,6 +1583,23 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    // Si el dueño confirmó que ya compró ciertos ítems de la lista de compras, los marcamos.
+    if (marcarComprado && Array.isArray(marcarComprado.ids) && marcarComprado.ids.length > 0) {
+      const fechaHoyMarcar = fechaDeHoyISOArgentina();
+      const listaComprasMarcar = loadListaCompras(fechaHoyMarcar);
+      let huboCambiosCompras = false;
+      listaComprasMarcar.items.forEach((item) => {
+        if (marcarComprado.ids.includes(item.id)) {
+          item.comprado = true;
+          huboCambiosCompras = true;
+        }
+      });
+      if (huboCambiosCompras) {
+        saveListaCompras(listaComprasMarcar);
+        console.log(`Ítems marcados como comprados: ${marcarComprado.ids.join(", ")}.`);
+      }
+    }
+
     // Si Claude pidió consultar el costo de envío, le mandamos la consulta al primer cadete activo.
     if (direccionEnvio) {
       const activos = cadetes.filter((c) => c.activo);
@@ -1416,7 +1681,7 @@ async function downloadWhatsappMedia(mediaId) {
 }
 
 // ==================== Llamada a la API de Claude ====================
-async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente) {
+async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1427,7 +1692,7 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy,
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
-      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente),
+      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño),
       messages: history,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
