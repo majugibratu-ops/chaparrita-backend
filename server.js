@@ -191,7 +191,7 @@ function agregarMensajeInbox(telefono, rol, texto, nombre) {
   if (!inbox[tel]) {
     inbox[tel] = { telefono: tel, nombre: nombre || "", modoManual: false, ultimaActividad: new Date().toISOString(), mensajes: [] };
   }
-  if (nombre && !inbox[tel].nombre) inbox[tel].nombre = nombre;
+  if (nombre) inbox[tel].nombre = nombre;
   inbox[tel].mensajes.push({ rol, texto, fecha: new Date().toISOString() });
   if (inbox[tel].mensajes.length > 100) inbox[tel].mensajes = inbox[tel].mensajes.slice(-100);
   inbox[tel].ultimaActividad = new Date().toISOString();
@@ -766,6 +766,9 @@ const conversations = new Map(); // phone -> [{role, content}]
 // ---- Consultas de envío pendientes: cadetePhone (normalizado) -> {customerPhone, direccion, askedAt} ----
 const pendingDeliveryQuotes = new Map();
 
+// ---- Comprobantes de pago pendientes de confirmación: staffPhone (normalizado) -> {customerPhone, askedAt} ----
+const pendingComprobantes = new Map();
+
 function soloDigitos(numero) {
   return (numero || "").replace(/[^\d]/g, "");
 }
@@ -948,6 +951,33 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // ¿Este mensaje viene de alguien del staff (cajera/dueño) que tiene un comprobante
+    // pendiente de confirmar? Si es así, tratamos su respuesta como la confirmación (o
+    // rechazo) del pago, y NO lo procesamos como si fuera un cliente hablándole al bot.
+    const staffConfig = config.staff || {};
+    const staffQueEscribe = [staffConfig.cajera, staffConfig.dueño]
+      .filter(Boolean)
+      .find((s) => soloDigitos(s.telefono) === soloDigitos(from));
+    if (staffQueEscribe && message.type === "text") {
+      const pendienteComprobante = pendingComprobantes.get(soloDigitos(from));
+      if (pendienteComprobante) {
+        pendingComprobantes.delete(soloDigitos(from));
+        const textoStaff = message.text.body;
+        agregarMensajeInbox(from, "cliente", textoStaff, staffQueEscribe.nombre);
+        console.log(`Respuesta de staff (${staffQueEscribe.nombre}) sobre comprobante: "${textoStaff}" — reenviando a ${pendienteComprobante.customerPhone}`);
+        await sendWhatsappText(
+          pendienteComprobante.customerPhone,
+          `Nuestro equipo revisó tu comprobante y nos dice: "${textoStaff}"`
+        );
+        const histClienteComprobante = conversations.get(pendienteComprobante.customerPhone) || [];
+        histClienteComprobante.push({ role: "assistant", content: [{ type: "text", text: `(El equipo respondió sobre el comprobante de pago: "${textoStaff}")` }] });
+        conversations.set(pendienteComprobante.customerPhone, histClienteComprobante);
+        return;
+      }
+      // Si no hay ningún comprobante pendiente, dejamos que el mensaje siga el flujo
+      // normal (por si el staff quiere probar el bot o hablar como cualquier cliente).
+    }
+
     // ¿Hay un postulante esperando mandar su CV en este número, y este mensaje es
     // una imagen o un documento (PDF)? Si es así, lo tratamos como el CV — guardamos
     // el archivo, lo evaluamos con IA, y confirmamos la recepción. No pasa por Claude
@@ -1000,15 +1030,15 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Tipos de mensaje que todavía no podemos "entender" (audio, video, sticker, ubicación, documento, etc):
+    // Tipos de mensaje que todavía no podemos "entender" (audio, video, sticker, ubicación, etc):
     // respondemos directo, sin pasar por Claude, para garantizar que el cliente SIEMPRE reciba algo.
-    if (message.type !== "text" && message.type !== "image") {
+    // Los PDFs (document) SÍ los dejamos pasar, para poder leerlos como posibles comprobantes.
+    if (message.type !== "text" && message.type !== "image" && message.type !== "document") {
       console.log(`Tipo de mensaje no soportado todavía (${message.type}) — respondemos con un mensaje directo.`);
       const avisoPorTipo = {
         audio: "¡Uy, todavía no puedo escuchar audios! ¿Me lo escribís por acá nomás? Así te ayudo al toque 🙌",
         video: "Por ahora no puedo ver videos, pero contame por escrito qué necesitás y te ayudo enseguida 🙌",
         sticker: "¡Jaja me gustó el sticker! ¿En qué te puedo ayudar? Contame por escrito 🙌",
-        document: "Por ahora no puedo abrir documentos (salvo comprobantes en foto). ¿Me contás por escrito qué necesitás?",
         location: "¡Recibí tu ubicación! Contame por escrito qué necesitás así seguimos 🙌",
       };
       const aviso = avisoPorTipo[message.type] || "Por ahora no puedo procesar ese tipo de mensaje. ¿Me contás por escrito qué necesitás? 🙌";
@@ -1128,7 +1158,17 @@ app.post("/webhook", async (req, res) => {
         clientes.push(cliente);
       }
       if (datosCliente) {
-        if (datosCliente.nombre) cliente.nombre = datosCliente.nombre;
+        if (datosCliente.nombre) {
+          cliente.nombre = datosCliente.nombre;
+          // Actualizamos también el nombre en /admin/inbox al instante, sin esperar
+          // a que el cliente mande otro mensaje para que se refleje ahí.
+          const inboxActualizado = loadInbox();
+          const telInbox = soloDigitos(from);
+          if (inboxActualizado[telInbox]) {
+            inboxActualizado[telInbox].nombre = datosCliente.nombre;
+            saveInbox(inboxActualizado);
+          }
+        }
         if (datosCliente.cumpleanos) cliente.cumpleanos = datosCliente.cumpleanos;
       }
       if (pedidoConfirmado) {
@@ -1206,19 +1246,24 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Si el cliente mandó una imagen (probablemente un comprobante), le reenviamos la imagen a quienes manejan pagos (NO a cocina).
-    if (message.type === "image" && message.image?.id) {
+    // Si el cliente mandó una imagen o un PDF (probablemente un comprobante), le reenviamos
+    // el archivo a quienes manejan pagos (NO a cocina), y guardamos que quedó pendiente
+    // de confirmación — así, cuando el staff responda, sabemos que es sobre esto y no
+    // lo tratamos como si fuera un cliente nuevo escribiéndole al bot.
+    if ((message.type === "image" && message.image?.id) || (message.type === "document" && message.document?.id)) {
       const staff = config.staff || {};
       const staffPhones = [staff.cajera, staff.dueño]
         .filter(Boolean)
         .map((s) => soloDigitos(s.telefono))
         .filter((tel) => tel && tel.length >= 10);
+      const captionAviso = `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación. Contestame acá mismo con "sí" o "no" (o contame el motivo si no es válido) para que se lo reenvíe automáticamente.`;
       for (const tel of staffPhones) {
-        await sendWhatsappImage(
-          tel,
-          message.image.id,
-          `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación.`
-        );
+        if (message.type === "image") {
+          await sendWhatsappImage(tel, message.image.id, captionAviso);
+        } else {
+          await sendWhatsappDocument(tel, message.document.id, captionAviso, message.document.filename || "comprobante.pdf");
+        }
+        pendingComprobantes.set(tel, { customerPhone: from, askedAt: Date.now() });
       }
     }
   } catch (err) {
@@ -1241,7 +1286,19 @@ async function buildUserContentBlocks(message) {
     ];
   }
 
-  // Otros tipos (audio, documento, ubicación, etc.) — se pueden sumar acá.
+  if (message.type === "document") {
+    const mediaId = message.document.id;
+    const { base64, mimeType } = await downloadWhatsappMedia(mediaId);
+    if (mimeType === "application/pdf") {
+      return [
+        { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+        { type: "text", text: message.document.caption || "Te mando el PDF (puede ser un comprobante de pago)." },
+      ];
+    }
+    return [{ type: "text", text: "[El cliente mandó un archivo que no es un PDF ni una imagen — todavía no lo podemos leer automáticamente]" }];
+  }
+
+  // Otros tipos (audio, ubicación, etc.) — se pueden sumar acá.
   return [{ type: "text", text: "[El cliente mandó un tipo de mensaje que todavía no procesamos automáticamente]" }];
 }
 
@@ -1458,6 +1515,30 @@ async function sendWhatsappImage(to, mediaId, caption) {
     console.error("ERROR al reenviar imagen por WhatsApp:", JSON.stringify(data));
   } else {
     console.log("Imagen reenviada a WhatsApp OK:", JSON.stringify(data));
+  }
+}
+
+async function sendWhatsappDocument(to, mediaId, caption, filename) {
+  const destino = normalizarParaEnvioAR(to);
+  console.log(`Reenviando documento (media id ${mediaId}) a ${destino}...`);
+  const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: destino,
+      type: "document",
+      document: { id: mediaId, caption, filename: filename || "documento.pdf" },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    console.error("ERROR al reenviar documento por WhatsApp:", JSON.stringify(data));
+  } else {
+    console.log("Documento reenviado a WhatsApp OK:", JSON.stringify(data));
   }
 }
 
