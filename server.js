@@ -232,22 +232,49 @@ function listaComprasVacia(fechaISO) {
   };
 }
 
-function loadListaCompras(fechaHoyISO) {
+// El historial completo se guarda como un diccionario {fecha: datosDelDia}, para poder
+// consultar días anteriores desde /admin/compras (antes solo se guardaba el día actual).
+function loadHistorialCompras() {
   let datos;
   try {
     datos = JSON.parse(fs.readFileSync(LISTA_COMPRAS_PATH, "utf8"));
   } catch {
-    datos = listaComprasVacia(fechaHoyISO);
+    return {};
   }
-  // Si la lista guardada es de un día anterior, arrancamos de cero automáticamente.
-  if (datos.fecha !== fechaHoyISO) {
-    datos = listaComprasVacia(fechaHoyISO);
+  // Migración automática: si el archivo tiene el formato viejo (un solo día suelto,
+  // sin diccionario por fecha), lo convertimos la primera vez que se lee.
+  if (datos && datos.fecha && !datos[datos.fecha]) {
+    const migrado = {};
+    migrado[datos.fecha] = datos;
+    return migrado;
   }
-  return datos;
+  return datos || {};
 }
 
-function saveListaCompras(datos) {
-  fs.writeFileSync(LISTA_COMPRAS_PATH, JSON.stringify(datos, null, 2), "utf8");
+function saveHistorialCompras(historial) {
+  fs.writeFileSync(LISTA_COMPRAS_PATH, JSON.stringify(historial, null, 2), "utf8");
+}
+
+// Devuelve la lista de compras de una fecha puntual, creándola vacía si todavía no existe
+// (se usa cuando hace falta escribir/agregar algo ese día).
+function loadListaCompras(fechaISO) {
+  const historial = loadHistorialCompras();
+  if (!historial[fechaISO]) {
+    return listaComprasVacia(fechaISO);
+  }
+  return historial[fechaISO];
+}
+
+function saveListaCompras(datosDia) {
+  const historial = loadHistorialCompras();
+  historial[datosDia.fecha] = datosDia;
+  saveHistorialCompras(historial);
+}
+
+// Para solo consultar un día (por ejemplo desde el panel), sin crear nada nuevo si no existe.
+function peekListaCompras(fechaISO) {
+  const historial = loadHistorialCompras();
+  return historial[fechaISO] || null;
 }
 
 // A qué rol de compras corresponde un teléfono dado (cocina / barra / salon=cajera), o null.
@@ -263,50 +290,55 @@ function rolDeComprasSegunTelefono(config, telefono) {
 // Arma el texto del mensaje con la lista de compras pendiente (lo que todavía no se compró).
 function construirMensajeListaCompras(items, rolesFaltantes) {
   const pendientes = items.filter((i) => !i.comprado);
+  const NOMBRES_ROL = { cocina: "Cocina", barra: "Barra", salon: "Salón" };
   if (pendientes.length === 0 && rolesFaltantes.length === 0) {
     return "🛒 No queda nada pendiente en la lista de compras — ¡ya está todo comprado! 🎉";
   }
-  const porCategoria = {};
+  const porRol = {};
   pendientes.forEach((item) => {
-    const cat = item.categoria || "Otros";
-    if (!porCategoria[cat]) porCategoria[cat] = [];
-    porCategoria[cat].push(item.texto);
+    const rol = item.origen || "otros";
+    if (!porRol[rol]) porRol[rol] = [];
+    porRol[rol].push(item.texto);
   });
 
   let mensaje = "🛒 *Lista de compras pendiente*\n";
-  Object.keys(porCategoria).forEach((cat) => {
-    mensaje += `\n*${cat}*\n`;
-    porCategoria[cat].forEach((texto) => {
+  ROLES_COMPRAS.forEach((rol) => {
+    if (porRol[rol] && porRol[rol].length > 0) {
+      mensaje += `\n*${NOMBRES_ROL[rol]} necesita:*\n`;
+      porRol[rol].forEach((texto) => {
+        mensaje += `· ${texto}\n`;
+      });
+    }
+  });
+  if (porRol.otros && porRol.otros.length > 0) {
+    mensaje += `\n*Otros:*\n`;
+    porRol.otros.forEach((texto) => {
       mensaje += `· ${texto}\n`;
     });
-  });
+  }
 
-  const NOMBRES_ROL = { cocina: "Cocina", barra: "Barra", salon: "Salón" };
   if (rolesFaltantes.length > 0) {
     mensaje += `\n⚠️ Todavía no llegó el pedido de: ${rolesFaltantes.map((r) => NOMBRES_ROL[r]).join(", ")}. Les mandé un mensaje pidiéndoselo.`;
   }
   return mensaje;
 }
 
-// Llamada aparte a Claude (no es parte de la charla con el dueño) para organizar los
-// pedidos sueltos de cocina/barra/salón en una sola lista, por categoría de comercio.
-const LISTA_COMPRAS_SYSTEM_PROMPT = `Sos un asistente que organiza listas de compras para un restaurante bar mexicano en Formosa, Argentina. Te paso los pedidos de compra que mandaron por separado el encargado de cocina, el de barra y la encargada de salón para el día siguiente. Tu trabajo es unificarlos en una sola lista organizada por categoría de comercio (por ejemplo: Verdulería, Fiambres, Super, Carnicería, Bebidas, Otros — usá las categorías que correspondan según los productos reales, no inventes categorías vacías).
+// Llamada aparte a Claude (no es parte de la charla con el dueño) para categorizar el
+// pedido de UNA sola persona (cocina, barra o salón) apenas lo manda, sin esperar a que
+// el dueño pida el resumen — así la lista se va armando en tiempo real.
+const LISTA_COMPRAS_SYSTEM_PROMPT = `Sos un asistente que organiza pedidos de compra para un restaurante bar mexicano en Formosa, Argentina. Te paso el pedido que mandó UNA sola persona del equipo (cocina, barra o salón) para el día. Tu trabajo es organizarlo en ítems, cada uno con su categoría de comercio correspondiente (por ejemplo: Verdulería, Fiambres, Super, Carnicería, Bebidas, Otros — usá las categorías que correspondan según los productos reales, no inventes categorías vacías).
 
 Reglas importantes:
-- NUNCA inventes ni agregues productos que no estén en los pedidos originales.
-- Si el mismo producto aparece en más de un pedido, sumalos en una sola línea con la cantidad total si podés calcularla con certeza; si no está claro cómo sumarlos, dejalos como líneas separadas.
+- NUNCA inventes ni agregues productos que no estén en el pedido original.
 - Mantené las cantidades y unidades tal como las escribieron, no las inventes ni las cambies.
+- Si un mismo ítem aparece repetido varias veces en el mismo pedido, podés unificarlo en una sola línea sumando la cantidad.
+- Para cada ítem, marcá "cantidadClara": true si el pedido especifica una cantidad o medida concreta (por ejemplo "5kg", "2 cajones", "1 bolsa", "3 unidades", "una docena"). Marcá "cantidadClara": false si el ítem es solo el nombre del producto sin ninguna cantidad ni medida (por ejemplo "papa", "hielo", "servilletas" sin número).
 
 Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown, sin \`\`\`), con esta forma exacta:
-{"items": [{"texto": "1 bolsa de papa", "categoria": "Verdulería"}, {"texto": "cheddar feta", "categoria": "Fiambres"}]}`;
+{"items": [{"texto": "1 bolsa de papa", "categoria": "Verdulería", "cantidadClara": true}, {"texto": "hielo", "categoria": "Otros", "cantidadClara": false}]}`;
 
-async function consolidarListaCompras(envios) {
-  const partes = [];
-  if (envios.cocina.recibido) partes.push(`Pedido de COCINA:\n${envios.cocina.textoOriginal}`);
-  if (envios.barra.recibido) partes.push(`Pedido de BARRA:\n${envios.barra.textoOriginal}`);
-  if (envios.salon.recibido) partes.push(`Pedido de SALÓN:\n${envios.salon.textoOriginal}`);
-  if (partes.length === 0) return [];
-
+async function categorizarPedidoIndividual(textoOriginal) {
+  if (!textoOriginal || !textoOriginal.trim()) return [];
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -317,31 +349,32 @@ async function consolidarListaCompras(envios) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 1200,
+        max_tokens: 1000,
         system: LISTA_COMPRAS_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: partes.join("\n\n") }],
+        messages: [{ role: "user", content: textoOriginal }],
       }),
     });
     const data = await response.json();
     if (!response.ok) {
-      console.error("Error de la API de Claude al consolidar lista de compras:", data);
+      console.error("Error de la API de Claude al categorizar pedido de compras:", data);
       return [];
     }
     const textoRespuesta = (data.content || [])
       .map((b) => (b.type === "text" ? b.text : ""))
       .filter(Boolean)
       .join("\n")
-      .trim()
-      .replace(/^```json\s*|\s*```$/g, "");
-    const parsed = JSON.parse(textoRespuesta);
-    return (parsed.items || []).map((item) => ({
-      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
-      texto: item.texto,
-      categoria: item.categoria || "Otros",
-      comprado: false,
-    }));
+      .trim();
+    // Extraemos el bloque {...} aunque Claude haya agregado texto de más antes o después,
+    // en vez de asumir que la respuesta entera es JSON puro.
+    const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("La respuesta de Claude no contenía JSON reconocible al categorizar pedido de compras:", textoRespuesta.slice(0, 300));
+      return [];
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.items || [];
   } catch (err) {
-    console.error("Error consolidando lista de compras:", err);
+    console.error("Error categorizando pedido de compras:", err);
     return [];
   }
 }
@@ -1020,6 +1053,10 @@ const pendingDeliveryQuotes = new Map();
 // ---- Comprobantes de pago pendientes de confirmación: staffPhone (normalizado) -> {customerPhone, askedAt} ----
 const pendingComprobantes = new Map();
 
+// ---- Cantidades de compras pendientes de aclarar: telefonoDelRol (normalizado) ->
+//      {ids: [...ids de ítems sin cantidad clara], rol} ----
+const pendingCantidadCompras = new Map();
+
 function soloDigitos(numero) {
   return (numero || "").replace(/[^\d]/g, "");
 }
@@ -1230,17 +1267,57 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ¿Este mensaje viene de cocina, barra o salón (cajera)? Si es así, y no era sobre un
-    // comprobante (ya se manejó arriba), lo tratamos como su pedido de compras del día —
-    // no pasa por Claude, se guarda tal cual para consolidarlo después.
+    // comprobante (ya se manejó arriba), lo tratamos como pedido de compras — no pasa por
+    // Claude, y sus ítems se categorizan y se suman a la lista al instante.
     const rolCompras = rolDeComprasSegunTelefono(config, from);
     if (rolCompras && message.type === "text") {
       const fechaHoyCompras = fechaDeHoyISOArgentina();
       const listaCompras = loadListaCompras(fechaHoyCompras);
+      const telRolActual = soloDigitos(from);
+
+      // Si le habíamos preguntado cantidades de algún ítem, este mensaje es la aclaración:
+      // sacamos los ítems viejos (sin cantidad) y los reemplazamos por lo que conteste ahora.
+      const aclaracionPendiente = pendingCantidadCompras.get(telRolActual);
+      if (aclaracionPendiente) {
+        pendingCantidadCompras.delete(telRolActual);
+        listaCompras.items = listaCompras.items.filter((item) => !aclaracionPendiente.ids.includes(item.id));
+      }
+
       listaCompras.envios[rolCompras] = { recibido: true, textoOriginal: message.text.body };
+
+      const itemsNuevos = await categorizarPedidoIndividual(message.text.body);
+      const idsSinCantidad = [];
+      itemsNuevos.forEach((item) => {
+        const nuevoId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+        listaCompras.items.push({
+          id: nuevoId,
+          texto: item.texto,
+          categoria: item.categoria || "Otros",
+          comprado: false,
+          origen: rolCompras,
+        });
+        if (item.cantidadClara === false) idsSinCantidad.push(nuevoId);
+      });
       saveListaCompras(listaCompras);
+
       agregarMensajeInbox(from, "cliente", message.text.body, (staffConfig[rolCompras === "salon" ? "cajera" : rolCompras] || {}).nombre);
-      console.log(`Pedido de compras recibido de ${rolCompras} (${from}).`);
-      await sendWhatsappText(from, "¡Recibido! 📝 Ya anoté tu pedido de compras para hoy, gracias 🙌");
+      console.log(`Pedido de compras recibido de ${rolCompras} (${from}) — ${itemsNuevos.length} ítem(s) sumados a la lista (${idsSinCantidad.length} sin cantidad clara).`);
+
+      if (idsSinCantidad.length > 0 && !aclaracionPendiente) {
+        // Solo repreguntamos una vez por tanda, para no generar un ida y vuelta infinito
+        // si la persona vuelve a contestar sin cantidad.
+        const textosSinCantidad = itemsNuevos.filter((i) => i.cantidadClara === false).map((i) => i.texto);
+        pendingCantidadCompras.set(telRolActual, { ids: idsSinCantidad, rol: rolCompras });
+        await sendWhatsappText(
+          from,
+          `¡Recibido! 📝 Ya anoté la mayoría, pero no me quedó clara la cantidad de: ${textosSinCantidad.join(", ")}. ¿Me decís cuánto necesitás de cada uno? 🙏`
+        );
+      } else {
+        const avisoRecibido = itemsNuevos.length > 0
+          ? "¡Recibido! 📝 Ya anoté tu pedido de compras para hoy, gracias 🙌"
+          : "¡Recibido! 📝 Igual no pude identificar ítems concretos en tu mensaje — si hace falta, mandalo de nuevo con el detalle de lo que necesitás 🙌";
+        await sendWhatsappText(from, avisoRecibido);
+      }
       return;
     }
 
@@ -1403,14 +1480,8 @@ app.post("/webhook", async (req, res) => {
     if (quiereListaCompras) {
       const fechaHoyCompras = fechaDeHoyISOArgentina();
       const listaCompras = loadListaCompras(fechaHoyCompras);
-
-      if (listaCompras.items.length === 0) {
-        const nuevosItems = await consolidarListaCompras(listaCompras.envios);
-        if (nuevosItems.length > 0) {
-          listaCompras.items = nuevosItems;
-          saveListaCompras(listaCompras);
-        }
-      }
+      // Los ítems ya se van sumando en tiempo real apenas cada rol manda su pedido
+      // (ver el bloque de arriba), así que acá solo leemos lo que ya está armado.
 
       const rolesFaltantes = ROLES_COMPRAS.filter((r) => !listaCompras.envios[r].recibido);
       const NOMBRES_ROL_STAFF = { cocina: "cocina", barra: "barra", salon: "cajera" };
@@ -1799,9 +1870,13 @@ async function evaluarCV(nombre, puesto, textoExtraido, imagenBase64, imagenMime
       .map((b) => (b.type === "text" ? b.text : ""))
       .filter(Boolean)
       .join("\n")
-      .trim()
-      .replace(/^```json\s*|\s*```$/g, "");
-    return JSON.parse(textoRespuesta);
+      .trim();
+    const jsonMatchCV = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatchCV) {
+      console.error("La respuesta de Claude no contenía JSON reconocible al evaluar CV:", textoRespuesta.slice(0, 300));
+      return { puntaje: null, resumenExperiencia: "", resumenEducacion: "", disponibilidad: "", comentario: "No se pudo evaluar automáticamente, revisar el CV a mano." };
+    }
+    return JSON.parse(jsonMatchCV[0]);
   } catch (err) {
     console.error("Error evaluando CV:", err);
     return { puntaje: null, resumenExperiencia: "", resumenEducacion: "", disponibilidad: "", comentario: "No se pudo evaluar automáticamente, revisar el CV a mano." };
@@ -1964,6 +2039,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
           <a class="tile" href="/admin/switch"><div class="tile-icono">🔌</div><div class="tile-texto"><b>Prender / apagar el asistente</b><div class="tile-desc">Pausalo cuando un operador quiera atender en persona.</div></div></a>
           <a class="tile" href="/admin/inbox"><div class="tile-icono">💬</div><div class="tile-texto"><b>Atender manualmente</b><div class="tile-desc">Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</div></div></a>
           <a class="tile" href="/admin/reservas"><div class="tile-icono">📅</div><div class="tile-texto"><b>Reservas</b><div class="tile-desc">Vé las reservas del día, editalas o reenviá la confirmación por WhatsApp.</div></div></a>
+          <a class="tile" href="/admin/compras"><div class="tile-icono">🛒</div><div class="tile-texto"><b>Lista de compras</b><div class="tile-desc">Vé el historial por día, tildá lo que ya compraste, agregá o editá ítems.</div></div></a>
           <a class="tile" href="/admin/clientes"><div class="tile-icono">👥</div><div class="tile-texto"><b>Clientes conocidos</b><div class="tile-desc">Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</div></div></a>
           <a class="tile" href="/admin/postulantes"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Postulantes / CVs</b><div class="tile-desc">Gente que dejó su CV, con puntaje automático según experiencia, formación y disponibilidad.</div></div></a>
           <a class="tile" href="/admin/listaespera"><div class="tile-icono">⏳</div><div class="tile-texto"><b>Lista de espera de mesas</b><div class="tile-desc">Clientes esperando lugar cuando el sector está lleno — se les avisa solo por WhatsApp.</div></div></a>
@@ -2551,6 +2627,230 @@ app.post("/admin/reservas-eliminar", requireAdminApi, (req, res) => {
   } catch (err) {
     console.error("Error al eliminar reserva:", err);
     res.status(500).json({ error: "No se pudo eliminar" });
+  }
+});
+
+// ==================== Panel de lista de compras (ver historial, tildar, agregar y editar) ====================
+app.get("/admin/compras", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Lista de compras</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .filtro-fecha-row { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+      .filtro-fecha-row input[type=date] { margin-top: 0; width: auto; }
+      .filtro-fecha-row button { margin-top: 0; }
+      .rol-bloque { margin-top: 16px; }
+      .rol-titulo { font-weight: 700; font-size: 14px; color: var(--turquesa); display: flex; align-items: center; gap: 8px; }
+      .rol-item { display: flex; align-items: center; gap: 10px; padding: 9px 6px; border-bottom: 1px solid var(--borde); }
+      .rol-item:last-child { border-bottom: none; }
+      .rol-item input[type=checkbox] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--verde-wa); }
+      .rol-item input[type=text] { margin-top: 0; flex: 1; font-size: 13.5px; }
+      .rol-item.comprado input[type=text] { text-decoration: line-through; color: var(--texto-tenue); }
+      .rol-item button { margin-top: 0; padding: 5px 9px; font-size: 11.5px; background: transparent; color: var(--coral); border: 1px solid var(--coral); border-radius: 6px; cursor: pointer; flex-shrink: 0; }
+      .rol-item button:hover { background: rgba(232,103,74,0.1); }
+      .agregar-item-row { display: flex; gap: 8px; margin-top: 10px; }
+      .agregar-item-row input[type=text] { margin-top: 0; flex: 1; }
+      .agregar-item-row select { margin-top: 0; }
+      .agregar-item-row button { margin-top: 0; white-space: nowrap; }
+      .estado-envios { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>🛒 Lista de compras</h1>',
+    '<p class="sub">Se sincroniza con lo que van mandando por WhatsApp cocina, barra y salón. Podés tildar, agregar o editar ítems acá y se refleja también si preguntan por WhatsApp.</p>',
+    '<div class="filtro-fecha-row">',
+    '  <input type="date" id="filtroFecha" />',
+    '  <button class="btn-secondary" id="btnHoy">Hoy</button>',
+    '</div>',
+    '<div class="estado-envios" id="estadoEnvios"></div>',
+    '<div id="msg">Cargando...</div>',
+    '<div class="card" id="agregarCard">',
+    '  <label>Agregar ítem manualmente</label>',
+    '  <div class="agregar-item-row">',
+    '    <input type="text" id="nuevoItemTexto" placeholder="Ej: 2 bolsas de hielo" />',
+    '    <select id="nuevoItemOrigen">',
+    '      <option value="cocina">Cocina</option>',
+    '      <option value="barra">Barra</option>',
+    '      <option value="salon">Salón</option>',
+    '      <option value="otros">Otros</option>',
+    '    </select>',
+    '    <button class="btn-primary" id="btnAgregarItem">Agregar</button>',
+    '  </div>',
+    '</div>',
+    '<div id="lista"></div>',
+    '<script>',
+    'var datosDia = null;',
+    'var fechaActual = "";',
+    'var NOMBRES_ROL = {cocina:"🍳 Cocina", barra:"🍹 Barra", salon:"🛎️ Salón", otros:"📦 Otros"};',
+    'function hoyISO() {',
+    '  var d = new Date();',
+    '  var tz = new Date(d.toLocaleString("en-US", {timeZone:"America/Argentina/Buenos_Aires"}));',
+    '  var y = tz.getFullYear(); var m = String(tz.getMonth()+1).padStart(2,"0"); var day = String(tz.getDate()).padStart(2,"0");',
+    '  return y + "-" + m + "-" + day;',
+    '}',
+    'document.getElementById("filtroFecha").value = hoyISO();',
+    'function cargar() {',
+    '  fechaActual = document.getElementById("filtroFecha").value || hoyISO();',
+    '  fetch("/admin/compras-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({fecha: fechaActual})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      datosDia = data.datosDia;',
+    '      document.getElementById("msg").textContent = "";',
+    '      pintarEstadoEnvios();',
+    '      pintar();',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
+    '}',
+    'cargar();',
+    'document.getElementById("btnHoy").addEventListener("click", function(){ document.getElementById("filtroFecha").value = hoyISO(); cargar(); });',
+    'document.getElementById("filtroFecha").addEventListener("change", cargar);',
+    'function pintarEstadoEnvios() {',
+    '  var cont = document.getElementById("estadoEnvios");',
+    '  cont.innerHTML = "";',
+    '  if (!datosDia) return;',
+    '  ["cocina","barra","salon"].forEach(function(rol) {',
+    '    var recibido = datosDia.envios && datosDia.envios[rol] && datosDia.envios[rol].recibido;',
+    '    var span = document.createElement("span");',
+    '    span.className = "badge " + (recibido ? "badge-alto" : "badge-pendiente");',
+    '    span.textContent = NOMBRES_ROL[rol] + (recibido ? " ✓ recibido" : " · sin enviar");',
+    '    cont.appendChild(span);',
+    '  });',
+    '}',
+    'function pintar() {',
+    '  var cont = document.getElementById("lista");',
+    '  cont.innerHTML = "";',
+    '  if (!datosDia || !datosDia.items || datosDia.items.length === 0) {',
+    '    cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🛒</div>No hay ítems cargados para esta fecha.</div>";',
+    '    return;',
+    '  }',
+    '  var porRol = {};',
+    '  datosDia.items.forEach(function(item) {',
+    '    var rol = item.origen || "otros";',
+    '    if (!porRol[rol]) porRol[rol] = [];',
+    '    porRol[rol].push(item);',
+    '  });',
+    '  ["cocina","barra","salon","otros"].forEach(function(rol) {',
+    '    if (!porRol[rol] || porRol[rol].length === 0) return;',
+    '    var bloque = document.createElement("div");',
+    '    bloque.className = "rol-bloque";',
+    '    var titulo = document.createElement("div");',
+    '    titulo.className = "rol-titulo";',
+    '    titulo.textContent = NOMBRES_ROL[rol];',
+    '    bloque.appendChild(titulo);',
+    '    porRol[rol].forEach(function(item) {',
+    '      var fila = document.createElement("div");',
+    '      fila.className = "rol-item" + (item.comprado ? " comprado" : "");',
+    '      var chk = document.createElement("input");',
+    '      chk.type = "checkbox";',
+    '      chk.checked = !!item.comprado;',
+    '      chk.addEventListener("change", function(){ marcarComprado(item.id, chk.checked); });',
+    '      var texto = document.createElement("input");',
+    '      texto.type = "text";',
+    '      texto.value = item.texto;',
+    '      texto.addEventListener("change", function(){ editarTexto(item.id, texto.value); });',
+    '      var btnDel = document.createElement("button");',
+    '      btnDel.textContent = "Eliminar";',
+    '      btnDel.addEventListener("click", function(){ eliminarItem(item.id); });',
+    '      fila.appendChild(chk); fila.appendChild(texto); fila.appendChild(btnDel);',
+    '      bloque.appendChild(fila);',
+    '    });',
+    '    cont.appendChild(bloque);',
+    '  });',
+    '}',
+    'function marcarComprado(id, comprado) {',
+    '  fetch("/admin/compras-marcar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({fecha: fechaActual, id: id, comprado: comprado})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(){ cargar(); });',
+    '}',
+    'function editarTexto(id, texto) {',
+    '  fetch("/admin/compras-editar-texto", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({fecha: fechaActual, id: id, texto: texto})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(){ cargar(); });',
+    '}',
+    'function eliminarItem(id) {',
+    '  fetch("/admin/compras-eliminar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({fecha: fechaActual, id: id})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(){ cargar(); });',
+    '}',
+    'document.getElementById("btnAgregarItem").addEventListener("click", function() {',
+    '  var texto = document.getElementById("nuevoItemTexto").value.trim();',
+    '  var origen = document.getElementById("nuevoItemOrigen").value;',
+    '  if (!texto) return;',
+    '  fetch("/admin/compras-agregar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({fecha: fechaActual, texto: texto, origen: origen})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(){ document.getElementById("nuevoItemTexto").value = ""; cargar(); });',
+    '});',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/compras-data", requireAdminApi, (req, res) => {
+  const fecha = req.body.fecha || fechaDeHoyISOArgentina();
+  res.json({ fecha, datosDia: peekListaCompras(fecha) });
+});
+
+app.post("/admin/compras-marcar", requireAdminApi, (req, res) => {
+  try {
+    const listaCompras = loadListaCompras(req.body.fecha);
+    const item = listaCompras.items.find((i) => i.id === req.body.id);
+    if (!item) return res.status(404).json({ error: "Ítem no encontrado" });
+    item.comprado = !!req.body.comprado;
+    saveListaCompras(listaCompras);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al marcar ítem de compras:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/compras-editar-texto", requireAdminApi, (req, res) => {
+  try {
+    const listaCompras = loadListaCompras(req.body.fecha);
+    const item = listaCompras.items.find((i) => i.id === req.body.id);
+    if (!item) return res.status(404).json({ error: "Ítem no encontrado" });
+    item.texto = req.body.texto;
+    saveListaCompras(listaCompras);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al editar ítem de compras:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/compras-eliminar", requireAdminApi, (req, res) => {
+  try {
+    const listaCompras = loadListaCompras(req.body.fecha);
+    listaCompras.items = listaCompras.items.filter((i) => i.id !== req.body.id);
+    saveListaCompras(listaCompras);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al eliminar ítem de compras:", err);
+    res.status(500).json({ error: "No se pudo eliminar" });
+  }
+});
+
+app.post("/admin/compras-agregar", requireAdminApi, (req, res) => {
+  try {
+    const texto = (req.body.texto || "").trim();
+    if (!texto) return res.status(400).json({ error: "Falta el texto del ítem" });
+    const listaCompras = loadListaCompras(req.body.fecha);
+    listaCompras.items.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      texto,
+      categoria: "Otros",
+      comprado: false,
+      origen: req.body.origen || "otros",
+    });
+    saveListaCompras(listaCompras);
+    console.log(`Ítem de compras agregado manualmente desde /admin/compras: "${texto}".`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al agregar ítem de compras:", err);
+    res.status(500).json({ error: "No se pudo agregar" });
   }
 });
 
