@@ -65,6 +65,20 @@ function saveReservas(lista) {
   fs.writeFileSync(RESERVAS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
+// Arma el texto de confirmación/actualización de una reserva, reutilizado tanto por el
+// envío automático del bot como por el botón manual del panel /admin/reservas.
+function construirMensajeConfirmacionReserva(r) {
+  const nombre = r.nombre ? r.nombre.split(" ")[0] : "";
+  return (
+    `¡Hola${nombre ? " " + nombre : ""}! 👋 Te confirmamos tu reserva en Chaparrita:\n\n` +
+    `📅 Fecha: ${r.fecha}\n` +
+    `🕒 Horario: ${r.hora}hs\n` +
+    `👥 Personas: ${r.personas || "-"}\n` +
+    `📍 Sector: ${r.sector || "a confirmar"}\n\n` +
+    `¡Te esperamos! 🌮`
+  );
+}
+
 // ---- Disponibilidad de mesas (calculada, no requiere que nadie la marque a mano) ----
 const SECTORES_VALIDOS = ["adentro", "patio", "vereda"];
 
@@ -1469,6 +1483,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
         <div class="tile-grid">
           <a class="tile" href="/admin/switch"><div class="tile-icono">🔌</div><div class="tile-texto"><b>Prender / apagar el asistente</b><div class="tile-desc">Pausalo cuando un operador quiera atender en persona.</div></div></a>
           <a class="tile" href="/admin/inbox"><div class="tile-icono">💬</div><div class="tile-texto"><b>Atender manualmente</b><div class="tile-desc">Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</div></div></a>
+          <a class="tile" href="/admin/reservas"><div class="tile-icono">📅</div><div class="tile-texto"><b>Reservas</b><div class="tile-desc">Vé las reservas del día, editalas o reenviá la confirmación por WhatsApp.</div></div></a>
           <a class="tile" href="/admin/clientes"><div class="tile-icono">👥</div><div class="tile-texto"><b>Clientes conocidos</b><div class="tile-desc">Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</div></div></a>
           <a class="tile" href="/admin/postulantes"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Postulantes / CVs</b><div class="tile-desc">Gente que dejó su CV, con puntaje automático según experiencia, formación y disponibilidad.</div></div></a>
           <a class="tile" href="/admin/listaespera"><div class="tile-icono">⏳</div><div class="tile-texto"><b>Lista de espera de mesas</b><div class="tile-desc">Clientes esperando lugar cuando el sector está lleno — se les avisa solo por WhatsApp.</div></div></a>
@@ -1825,7 +1840,194 @@ app.post("/admin/listaespera-quitar", requireAdminApi, (req, res) => {
   }
 });
 
-// ==================== Bandeja de entrada manual (atender sin usar el celular) ====================
+// ==================== Panel de reservas (ver, editar y confirmar manualmente) ====================
+app.get("/admin/reservas", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Reservas</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .filtro-fecha-row { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+      .filtro-fecha-row input[type=date] { margin-top: 0; width: auto; }
+      .filtro-fecha-row button { margin-top: 0; }
+      .reserva-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+      .reserva-nombre { font-weight: 700; font-size: 15px; }
+      .reserva-tel { font-size: 12px; color: var(--texto-tenue); margin-top: 2px; }
+      .reserva-campos { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+      .reserva-campos label { margin-top: 0; }
+      .reserva-acciones { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+      .reserva-acciones button, .reserva-acciones a { font-size: 12.5px; padding: 7px 12px; margin-top: 0; text-decoration: none; border-radius: 8px; }
+      .btn-guardar-mini { background: var(--bg-elevado); color: var(--texto); border: 1px solid var(--borde); cursor: pointer; }
+      .btn-guardar-mini:hover { border-color: var(--turquesa); }
+      .btn-enviar-mini { background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); color: #fff; border: none; cursor: pointer; }
+      .btn-eliminar-mini { background: transparent; color: var(--coral); border: 1px solid var(--coral); cursor: pointer; }
+      .btn-eliminar-mini:hover { background: rgba(232,103,74,0.1); }
+      .link-chat-mini { background: transparent; color: var(--turquesa); border: 1px solid var(--turquesa); }
+      .link-chat-mini:hover { background: rgba(18,140,126,0.1); }
+      .badge-recordatorio { font-size: 10.5px; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>📅 Reservas</h1>',
+    '<p class="sub">Vista de las reservas cargadas por el agente. Podés editarlas, reenviar la confirmación por WhatsApp, o eliminarlas.</p>',
+    '<div class="filtro-fecha-row">',
+    '  <input type="date" id="filtroFecha" />',
+    '  <button class="btn-secondary" id="btnHoy">Hoy</button>',
+    '  <button class="btn-secondary" id="btnTodas">Ver todas</button>',
+    '</div>',
+    '<div id="msg">Cargando...</div>',
+    '<div id="lista"></div>',
+    '<script>',
+    'var todas = [];',
+    'function hoyISO() {',
+    '  var d = new Date();',
+    '  var tz = new Date(d.toLocaleString("en-US", {timeZone:"America/Argentina/Buenos_Aires"}));',
+    '  var y = tz.getFullYear(); var m = String(tz.getMonth()+1).padStart(2,"0"); var day = String(tz.getDate()).padStart(2,"0");',
+    '  return y + "-" + m + "-" + day;',
+    '}',
+    'document.getElementById("filtroFecha").value = hoyISO();',
+    'function cargar() {',
+    '  fetch("/admin/reservas-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      todas = data.reservas;',
+    '      document.getElementById("msg").textContent = "";',
+    '      pintar();',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
+    '}',
+    'cargar();',
+    'document.getElementById("btnHoy").addEventListener("click", function(){ document.getElementById("filtroFecha").value = hoyISO(); pintar(); });',
+    'document.getElementById("btnTodas").addEventListener("click", function(){ document.getElementById("filtroFecha").value = ""; pintar(); });',
+    'document.getElementById("filtroFecha").addEventListener("change", pintar);',
+    'function pintar() {',
+    '  var cont = document.getElementById("lista");',
+    '  cont.innerHTML = "";',
+    '  var fechaFiltro = document.getElementById("filtroFecha").value;',
+    '  var lista = todas.slice();',
+    '  if (fechaFiltro) lista = lista.filter(function(r){ return r.fecha === fechaFiltro; });',
+    '  lista.sort(function(a,b){ return (a.fecha+a.hora).localeCompare(b.fecha+b.hora); });',
+    '  if (lista.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">📅</div>No hay reservas para mostrar.</div>"; return; }',
+    '  lista.forEach(function(r) {',
+    '    var div = document.createElement("div");',
+    '    div.className = "card";',
+    '    var badgeRec = r.recordatorioEnviado ? "<span class=\\"badge badge-alto badge-recordatorio\\">Recordatorio enviado</span>" : "<span class=\\"badge badge-pendiente badge-recordatorio\\">Sin recordatorio aún</span>";',
+    '    div.innerHTML =',
+    '      "<div class=\\"reserva-top\\"><div><span class=\\"reserva-nombre\\">" + (r.nombre || "(sin nombre)") + "</span><div class=\\"reserva-tel\\">+" + r.telefono + "</div></div>" + badgeRec + "</div>" +',
+    '      "<div class=\\"reserva-campos\\">" +',
+    '      "<div><label>Fecha</label><input type=\\"date\\" data-campo=\\"fecha\\" value=\\"" + r.fecha + "\\" /></div>" +',
+    '      "<div><label>Hora</label><input type=\\"time\\" data-campo=\\"hora\\" value=\\"" + r.hora + "\\" /></div>" +',
+    '      "<div><label>Personas</label><input type=\\"number\\" data-campo=\\"personas\\" value=\\"" + (r.personas || "") + "\\" /></div>" +',
+    '      "<div><label>Sector</label><select data-campo=\\"sector\\">" +',
+    '        ["adentro","patio","vereda"].map(function(s){ return "<option value=\\"" + s + "\\"" + (r.sector === s ? " selected" : "") + ">" + s + "</option>"; }).join("") +',
+    '      "</select></div>" +',
+    '      "</div>" +',
+    '      "<div class=\\"reserva-acciones\\">" +',
+    '      "<button class=\\"btn-guardar-mini\\" data-accion=\\"guardar\\">Guardar cambios</button>" +',
+    '      "<button class=\\"btn-enviar-mini\\" data-accion=\\"enviar\\">Enviar confirmación por WhatsApp</button>" +',
+    '      "<button class=\\"btn-eliminar-mini\\" data-accion=\\"eliminar\\">Eliminar</button>" +',
+    '      "<a class=\\"link-chat-mini\\" href=\\"/admin/inbox?tel=" + r.telefono + "\\">Ir al chat</a>" +',
+    '      "</div>";',
+    '',
+    '    function leerCampos() {',
+    '      var campos = {};',
+    '      div.querySelectorAll("[data-campo]").forEach(function(input){ campos[input.getAttribute("data-campo")] = input.value; });',
+    '      return campos;',
+    '    }',
+    '',
+    '    div.querySelector("[data-accion=guardar]").addEventListener("click", function(btn){',
+    '      var campos = leerCampos();',
+    '      fetch("/admin/reservas-guardar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: r.id, campos: campos})})',
+    '        .then(function(resp){ return resp.json(); })',
+    '        .then(function(){ cargar(); });',
+    '    });',
+    '    div.querySelector("[data-accion=enviar]").addEventListener("click", function(){',
+    '      var campos = leerCampos();',
+    '      var btn = div.querySelector("[data-accion=enviar]");',
+    '      btn.textContent = "Enviando...";',
+    '      btn.disabled = true;',
+    '      fetch("/admin/reservas-enviar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: r.id, campos: campos})})',
+    '        .then(function(resp){ return resp.json(); })',
+    '        .then(function(data){ btn.textContent = data.ok ? "¡Enviado!" : "Error al enviar"; setTimeout(function(){ cargar(); }, 900); })',
+    '        .catch(function(){ btn.textContent = "Error al enviar"; });',
+    '    });',
+    '    div.querySelector("[data-accion=eliminar]").addEventListener("click", function(){',
+    '      if (!confirm("¿Eliminar esta reserva? No se puede deshacer.")) return;',
+    '      fetch("/admin/reservas-eliminar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: r.id})})',
+    '        .then(function(resp){ return resp.json(); })',
+    '        .then(function(){ cargar(); });',
+    '    });',
+    '',
+    '    cont.appendChild(div);',
+    '  });',
+    '}',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/reservas-data", requireAdminApi, (_req, res) => {
+  res.json({ reservas: loadReservas() });
+});
+
+app.post("/admin/reservas-guardar", requireAdminApi, (req, res) => {
+  try {
+    const reservas = loadReservas();
+    const reserva = reservas.find((r) => r.id === req.body.id);
+    if (!reserva) return res.status(404).json({ error: "Reserva no encontrada" });
+    const campos = req.body.campos || {};
+    if (campos.fecha) reserva.fecha = campos.fecha;
+    if (campos.hora) reserva.hora = campos.hora;
+    if (campos.personas) reserva.personas = Number(campos.personas);
+    if (campos.sector) reserva.sector = campos.sector;
+    saveReservas(reservas);
+    console.log(`Reserva ${reserva.id} editada manualmente desde /admin/reservas.`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al guardar reserva:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/reservas-enviar", requireAdminApi, async (req, res) => {
+  try {
+    const reservas = loadReservas();
+    const reserva = reservas.find((r) => r.id === req.body.id);
+    if (!reserva) return res.status(404).json({ error: "Reserva no encontrada" });
+    const campos = req.body.campos || {};
+    if (campos.fecha) reserva.fecha = campos.fecha;
+    if (campos.hora) reserva.hora = campos.hora;
+    if (campos.personas) reserva.personas = Number(campos.personas);
+    if (campos.sector) reserva.sector = campos.sector;
+    saveReservas(reservas);
+
+    const mensaje = construirMensajeConfirmacionReserva(reserva);
+    const enviado = await sendWhatsappText(reserva.telefono, mensaje);
+    agregarMensajeInbox(reserva.telefono, "humano", mensaje);
+    console.log(`Confirmación de reserva ${reserva.id} reenviada manualmente desde /admin/reservas (${enviado ? "OK" : "FALLÓ"}).`);
+    res.json({ ok: enviado });
+  } catch (err) {
+    console.error("Error al enviar confirmación de reserva:", err);
+    res.status(500).json({ error: "No se pudo enviar" });
+  }
+});
+
+app.post("/admin/reservas-eliminar", requireAdminApi, (req, res) => {
+  try {
+    const reservas = loadReservas();
+    const actualizada = reservas.filter((r) => r.id !== req.body.id);
+    saveReservas(actualizada);
+    console.log(`Reserva ${req.body.id} eliminada desde /admin/reservas.`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al eliminar reserva:", err);
+    res.status(500).json({ error: "No se pudo eliminar" });
+  }
+});
+
+
 app.get("/admin/inbox", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
