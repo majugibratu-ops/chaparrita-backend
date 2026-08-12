@@ -24,7 +24,102 @@ if (!fs.existsSync(CONFIG_PATH) && fs.existsSync(LEGACY_CONFIG_PATH)) {
   console.log("Migrado config.json a data/config.json (primera vez que arranca con esta versión).");
 }
 function loadConfig() {
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  return migrarEquipoSiHaceFalta(config);
+}
+
+// ---- Equipo unificado: antes esto estaba repartido en config.staff, avisosReservas,
+//      avisosPedidos y deliveryConfig por separado — ahora es una sola lista de personas,
+//      cada una con checkboxes de qué permisos/roles tiene. Esta función convierte los
+//      datos viejos la primera vez que arranca con esta versión, y no vuelve a tocarlos
+//      después (una vez migrado, config.equipo manda).
+function migrarEquipoSiHaceFalta(config) {
+  if (Array.isArray(config.equipo)) return config; // ya migrado (aunque esté vacío, no se vuelve a migrar)
+
+  const equipo = [];
+  const indicePorTelefono = {};
+
+  function obtenerOCrear(nombre, telefono) {
+    const tel = soloDigitos(telefono);
+    if (!tel) return null;
+    if (indicePorTelefono[tel] === undefined) {
+      equipo.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+        nombre: nombre || "",
+        telefono: telefono || "",
+        activo: true,
+        esDueño: false,
+        recibeReservas: false,
+        recibePedidos: false,
+        confirmaComprobantes: false,
+        esCadeteDelivery: false,
+        areaCompras: "",
+      });
+      indicePorTelefono[tel] = equipo.length - 1;
+    } else if (nombre && !equipo[indicePorTelefono[tel]].nombre) {
+      equipo[indicePorTelefono[tel]].nombre = nombre;
+    }
+    return equipo[indicePorTelefono[tel]];
+  }
+
+  const staff = config.staff || {};
+  if (staff.dueño && staff.dueño.telefono) {
+    const p = obtenerOCrear(staff.dueño.nombre, staff.dueño.telefono);
+    if (p) p.esDueño = true;
+  }
+  if (staff.cajera && staff.cajera.telefono) {
+    const p = obtenerOCrear(staff.cajera.nombre, staff.cajera.telefono);
+    if (p) {
+      p.confirmaComprobantes = true;
+      p.areaCompras = "salon";
+    }
+  }
+  if (staff.cocina && staff.cocina.telefono) {
+    const p = obtenerOCrear(staff.cocina.nombre, staff.cocina.telefono);
+    if (p) {
+      p.recibePedidos = true;
+      p.areaCompras = "cocina";
+    }
+  }
+  if (staff.barra && staff.barra.telefono) {
+    const p = obtenerOCrear(staff.barra.nombre, staff.barra.telefono);
+    if (p) p.areaCompras = "barra";
+  }
+  (config.avisosReservas || []).forEach((a) => {
+    if (!a.telefono) return;
+    const p = obtenerOCrear(a.nombre, a.telefono);
+    if (p && a.activo) p.recibeReservas = true;
+  });
+  (config.avisosPedidos || []).forEach((a) => {
+    if (!a.telefono) return;
+    const p = obtenerOCrear(a.nombre, a.telefono);
+    if (p && a.activo) p.recibePedidos = true;
+  });
+  (config.deliveryConfig || []).forEach((c) => {
+    if (!c.telefono) return;
+    const p = obtenerOCrear(c.nombre, c.telefono);
+    if (p) p.esCadeteDelivery = !!c.activo;
+  });
+
+  config.equipo = equipo;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  console.log(`Equipo migrado automáticamente a la lista unificada (${equipo.length} persona(s)).`);
+  return config;
+}
+
+function equipoActivo(config) {
+  return (config.equipo || []).filter((p) => p.activo !== false && p.telefono);
+}
+function equipoConPermiso(config, campo) {
+  return equipoActivo(config).filter((p) => p[campo]);
+}
+function equipoPorTelefono(config, telefono) {
+  const tel = soloDigitos(telefono);
+  if (!tel) return null;
+  return equipoActivo(config).find((p) => soloDigitos(p.telefono) === tel) || null;
+}
+function equipoPorAreaCompras(config, area) {
+  return equipoActivo(config).find((p) => p.areaCompras === area) || null;
 }
 
 // ---- Menú del local (se puede reemplazar subiendo un PDF nuevo desde /admin) ----
@@ -279,12 +374,8 @@ function peekListaCompras(fechaISO) {
 
 // A qué rol de compras corresponde un teléfono dado (cocina / barra / salon=cajera), o null.
 function rolDeComprasSegunTelefono(config, telefono) {
-  const staff = config.staff || {};
-  const tel = soloDigitos(telefono);
-  if (staff.cocina && soloDigitos(staff.cocina.telefono) === tel) return "cocina";
-  if (staff.barra && soloDigitos(staff.barra.telefono) === tel) return "barra";
-  if (staff.cajera && soloDigitos(staff.cajera.telefono) === tel) return "salon";
-  return null;
+  const persona = equipoPorTelefono(config, telefono);
+  return persona && persona.areaCompras ? persona.areaCompras : null;
 }
 
 // Arma el texto del mensaje con la lista de compras pendiente (lo que todavía no se compró).
@@ -678,14 +769,11 @@ const ADMIN_CONFIG_PAGE = [
   '<a href="#sec-cumple-promos">Promos de cumpleaños</a>',
   '<a href="#sec-precios-base">Presupuesto a medida</a>',
   '<a href="#sec-cuenta-sena">Cuenta para la seña</a>',
-  '<a href="#sec-equipo">Equipo (teléfonos)</a>',
+  '<a href="#sec-equipo">Equipo</a>',
   '<a href="#sec-oferta-cumple">Oferta cumpleaños próximo</a>',
   '<a href="#sec-cumple-cliente">Cumpleaños de clientes</a>',
   '<a href="#sec-aviso-cumple-diario">Aviso diario de cumpleaños</a>',
   '<a href="#sec-tacos-libres">Tacos libres</a>',
-  '<a href="#sec-cadetes">Delivery - cadetes</a>',
-  '<a href="#sec-aviso-reservas">Aviso de reservas al staff</a>',
-  '<a href="#sec-aviso-pedidos">Aviso de pedidos</a>',
   '<a href="#sec-promos-dia">Promos por día</a>',
   '<a href="#sec-conocimiento">Base de conocimiento</a>',
   '</nav>',
@@ -821,22 +909,51 @@ const ADMIN_CONFIG_PAGE = [
   '  area.appendChild(el("div", {class:"row"}, [field("CUIT/CUIL", ctCuit), field("Alias", ctAlias)]));',
   '  area.appendChild(field("CVU", ctCvu));',
   '',
-  '  area.appendChild(el("h2", {text:"Equipo (telefonos internos, nunca se muestran al cliente)", id:"sec-equipo"}));',
-  '  var stf = cfg.staff;',
-  '  var cajNombre = textInput(stf.cajera.nombre), cajTel = textInput(stf.cajera.telefono);',
-  '  var duenoNombre = textInput(stf.due\u00f1o.nombre), duenoTel = textInput(stf.due\u00f1o.telefono);',
-  '  var cocinaObj = stf.cocina || {nombre:"", telefono:""};',
-  '  var cocinaNombre = textInput(cocinaObj.nombre), cocinaTel = textInput(cocinaObj.telefono);',
-  '  var barraObj = stf.barra || {nombre:"", telefono:""};',
-  '  var barraNombre = textInput(barraObj.nombre), barraTel = textInput(barraObj.telefono);',
-  '  area.appendChild(el("div", {class:"row"}, [field("Nombre cajera/o (tambi\u00e9n encargada de sal\u00f3n)", cajNombre), field("Telefono (con 549...)", cajTel)]));',
-  '  area.appendChild(el("div", {class:"row"}, [field("Nombre dueno/a", duenoNombre), field("Telefono (con 549...)", duenoTel)]));',
-  '  area.appendChild(el("div", {class:"row"}, [field("Nombre jefe de cocina", cocinaNombre), field("Telefono (con 549...)", cocinaTel)]));',
-  '  area.appendChild(el("div", {class:"row"}, [field("Nombre encargado/a de barra", barraNombre), field("Telefono (con 549...)", barraTel)]));',
-  '  area.appendChild(el("p", {text:"A cocina se le reenvia automaticamente el resumen apenas se confirma un pedido. Cocina, barra y sal\u00f3n (cajera) son quienes mandan su lista de compras diaria.", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 0 0;"}));',
+  '  area.appendChild(el("h2", {text:"Equipo", id:"sec-equipo"}));',
+  '  area.appendChild(el("p", {text:"Una sola lista para todo el equipo. Cada persona puede tener varios permisos a la vez (tildá los que correspondan). Cargá el tel\u00e9fono con c\u00f3digo de pa\u00eds y 9 (ej: 549370XXXXXXX).", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var equipoBox = el("div", {id:"equipoBox"});',
+  '  var equipoList = JSON.parse(JSON.stringify(cfg.equipo || []));',
+  '  var AREAS_COMPRAS = [["","Ninguna"],["cocina","Cocina"],["barra","Barra"],["salon","Sal\u00f3n"]];',
+  '  function checkboxConLabel(persona, campo, textoLabel) {',
+  '    var chk = el("input", {type:"checkbox"}); chk.checked = !!persona[campo]; chk.onchange = function(){ persona[campo] = chk.checked; };',
+  '    var lbl = el("label", {text:" " + textoLabel}); lbl.style.display = "inline"; lbl.style.fontWeight = "normal";',
+  '    return el("div", {style:"margin-top:6px;"}, [chk, lbl]);',
+  '  }',
+  '  function pintarEquipo() {',
+  '    equipoBox.innerHTML = "";',
+  '    equipoList.forEach(function(persona, idx) {',
+  '      var nombreI = textInput(persona.nombre); nombreI.oninput = function(){ persona.nombre = nombreI.value; };',
+  '      var telI = textInput(persona.telefono); telI.oninput = function(){ persona.telefono = telI.value; };',
+  '      var selectArea = el("select", {});',
+  '      AREAS_COMPRAS.forEach(function(opt){',
+  '        var option = el("option", {text: opt[1]}); option.value = opt[0]; if (persona.areaCompras === opt[0]) option.selected = true;',
+  '        selectArea.appendChild(option);',
+  '      });',
+  '      selectArea.onchange = function(){ persona.areaCompras = selectArea.value; };',
+  '      var btnDel = el("button", {type:"button", text:"Eliminar de la lista", class:"btn-danger"});',
+  '      btnDel.addEventListener("click", function(){ equipoList.splice(idx,1); pintarEquipo(); });',
+  '      var card = el("div", {class:"card"}, [',
+  '        el("div", {class:"row"}, [field("Nombre", nombreI), field("Tel\u00e9fono", telI)]),',
+  '        checkboxConLabel(persona, "activo", "Activo (en general)"),',
+  '        checkboxConLabel(persona, "esDueño", "\ud83d\udc51 Es el due\u00f1o (saludo especial + asistente de compras)"),',
+  '        checkboxConLabel(persona, "recibeReservas", "\ud83d\udcc5 Recibe confirmaci\u00f3n de reservas"),',
+  '        checkboxConLabel(persona, "recibePedidos", "\ud83c\udf7d\ufe0f Recibe pedidos confirmados (cocina)"),',
+  '        checkboxConLabel(persona, "confirmaComprobantes", "\ud83d\udcb3 Confirma comprobantes de pago"),',
+  '        checkboxConLabel(persona, "esCadeteDelivery", "\ud83d\udef5 Es cadete de delivery (se le consulta el env\u00edo)"),',
+  '        field("\u00c1rea de compras diaria", selectArea),',
+  '        btnDel',
+  '      ]);',
+  '      equipoBox.appendChild(card);',
+  '    });',
+  '  }',
+  '  pintarEquipo();',
+  '  area.appendChild(equipoBox);',
+  '  var btnAddPersona = el("button", {type:"button", text:"+ Agregar persona", class:"btn-secondary"});',
+  '  btnAddPersona.addEventListener("click", function(){ equipoList.push({id: Date.now() + "-" + Math.random().toString(36).slice(2,8), nombre:"Nueva persona", telefono:"", activo:true, esDueño:false, recibeReservas:false, recibePedidos:false, confirmaComprobantes:false, esCadeteDelivery:false, areaCompras:""}); pintarEquipo(); });',
+  '  area.appendChild(btnAddPersona);',
   '',
   '  var grupoInput = textInput(cfg.grupoReservasWhatsappId);',
-  '  area.appendChild(field("ID de WhatsApp del grupo Reservas Chaparrita", grupoInput));',
+  '  area.appendChild(field("ID de WhatsApp del grupo Reservas Chaparrita (viejo, no funciona con la API actual)", grupoInput));',
   '',
   '  area.appendChild(el("h2", {text:"Oferta proactiva antes del cumpleanos", id:"sec-oferta-cumple"}));',
   '  area.appendChild(el("p", {text:"Le manda un WhatsApp al cliente antes de su cumple ofreciendole reservar (con los beneficios de abajo) o las promos grupales.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
@@ -886,90 +1003,6 @@ const ADMIN_CONFIG_PAGE = [
   '  area.appendChild(field("Dias con tacos libres", tlpDiasBox));',
   '  var tlpPrecioInput = numInput(tlp.precioPersona);',
   '  area.appendChild(field("Precio por persona", tlpPrecioInput));',
-  '',
-  '  area.appendChild(el("h2", {text:"Delivery - cadetes", id:"sec-cadetes"}));',
-  '  area.appendChild(el("p", {text:"Cargá el telefono con codigo de pais y 9 (ej: 549370XXXXXXX). Solo se le consulta el envio a los que esten Activos.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
-  '  var cadetesBox = el("div", {id:"cadetesBox"});',
-  '  var cadetesList = JSON.parse(JSON.stringify(cfg.deliveryConfig || []));',
-  '  function pintarCadetes() {',
-  '    cadetesBox.innerHTML = "";',
-  '    cadetesList.forEach(function(c, idx) {',
-  '      var nombreI = textInput(c.nombre); nombreI.oninput = function(){ c.nombre = nombreI.value; };',
-  '      var telI = textInput(c.telefono); telI.oninput = function(){ c.telefono = telI.value; };',
-  '      var activoI = el("input", {type:"checkbox"}); activoI.checked = !!c.activo; activoI.onchange = function(){ c.activo = activoI.checked; };',
-  '      var lblActivo = el("label", {text:" Activo (se le consulta el envio)"});',
-  '      lblActivo.style.display = "inline"; lblActivo.style.fontWeight = "normal";',
-  '      var btnDel = el("button", {type:"button", text:"Eliminar cadete", class:"btn-danger"});',
-  '      btnDel.addEventListener("click", function(){ cadetesList.splice(idx,1); pintarCadetes(); });',
-  '      var wrapChk = el("div", {}, [activoI, lblActivo]);',
-  '      var card = el("div", {class:"card"}, [',
-  '        el("div", {class:"row"}, [field("Nombre", nombreI), field("Telefono", telI)]),',
-  '        wrapChk, btnDel',
-  '      ]);',
-  '      cadetesBox.appendChild(card);',
-  '    });',
-  '  }',
-  '  pintarCadetes();',
-  '  area.appendChild(cadetesBox);',
-  '  var btnAddCadete = el("button", {type:"button", text:"+ Agregar cadete", class:"btn-secondary"});',
-  '  btnAddCadete.addEventListener("click", function(){ cadetesList.push({nombre:"Nuevo cadete", telefono:"", activo:true}); pintarCadetes(); });',
-  '  area.appendChild(btnAddCadete);',
-  '',
-  '  area.appendChild(el("h2", {text:"Aviso de reservas al staff", id:"sec-aviso-reservas"}));',
-  '  area.appendChild(el("p", {text:"La API de WhatsApp no permite mandar mensajes a grupos, asi que cuando se confirma una reserva se le avisa individualmente a cada persona activa de esta lista (ademas del grupo viejo, si sigue cargado). Cargá el telefono con codigo de pais y 9 (ej: 549370XXXXXXX).", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
-  '  var avisosBox = el("div", {id:"avisosBox"});',
-  '  var avisosList = JSON.parse(JSON.stringify(cfg.avisosReservas || []));',
-  '  function pintarAvisos() {',
-  '    avisosBox.innerHTML = "";',
-  '    avisosList.forEach(function(a, idx) {',
-  '      var nombreI = textInput(a.nombre); nombreI.oninput = function(){ a.nombre = nombreI.value; };',
-  '      var telI = textInput(a.telefono); telI.oninput = function(){ a.telefono = telI.value; };',
-  '      var activoI = el("input", {type:"checkbox"}); activoI.checked = !!a.activo; activoI.onchange = function(){ a.activo = activoI.checked; };',
-  '      var lblActivo = el("label", {text:" Activo (recibe el aviso de reservas)"});',
-  '      lblActivo.style.display = "inline"; lblActivo.style.fontWeight = "normal";',
-  '      var btnDel = el("button", {type:"button", text:"Eliminar", class:"btn-danger"});',
-  '      btnDel.addEventListener("click", function(){ avisosList.splice(idx,1); pintarAvisos(); });',
-  '      var wrapChk = el("div", {}, [activoI, lblActivo]);',
-  '      var card = el("div", {class:"card"}, [',
-  '        el("div", {class:"row"}, [field("Nombre", nombreI), field("Telefono", telI)]),',
-  '        wrapChk, btnDel',
-  '      ]);',
-  '      avisosBox.appendChild(card);',
-  '    });',
-  '  }',
-  '  pintarAvisos();',
-  '  area.appendChild(avisosBox);',
-  '  var btnAddAviso = el("button", {type:"button", text:"+ Agregar persona", class:"btn-secondary"});',
-  '  btnAddAviso.addEventListener("click", function(){ avisosList.push({nombre:"Nueva persona", telefono:"", activo:true}); pintarAvisos(); });',
-  '  area.appendChild(btnAddAviso);',
-  '',
-  '  area.appendChild(el("h2", {text:"Aviso de pedidos", id:"sec-aviso-pedidos"}));',
-  '  area.appendChild(el("p", {text:"Adem\u00e1s de cocina (arriba), pod\u00e9s sumar m\u00e1s gente que quiera enterarse de cada pedido confirmado (la cajera, vos mismo, etc.). Carg\u00e1 el telefono con codigo de pais y 9 (ej: 549370XXXXXXX).", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
-  '  var avisosPedidosBox = el("div", {id:"avisosPedidosBox"});',
-  '  var avisosPedidosList = JSON.parse(JSON.stringify(cfg.avisosPedidos || []));',
-  '  function pintarAvisosPedidos() {',
-  '    avisosPedidosBox.innerHTML = "";',
-  '    avisosPedidosList.forEach(function(a, idx) {',
-  '      var nombreI = textInput(a.nombre); nombreI.oninput = function(){ a.nombre = nombreI.value; };',
-  '      var telI = textInput(a.telefono); telI.oninput = function(){ a.telefono = telI.value; };',
-  '      var activoI = el("input", {type:"checkbox"}); activoI.checked = !!a.activo; activoI.onchange = function(){ a.activo = activoI.checked; };',
-  '      var lblActivo = el("label", {text:" Activo (recibe el aviso de pedidos)"});',
-  '      lblActivo.style.display = "inline"; lblActivo.style.fontWeight = "normal";',
-  '      var btnDel = el("button", {type:"button", text:"Eliminar", class:"btn-danger"});',
-  '      btnDel.addEventListener("click", function(){ avisosPedidosList.splice(idx,1); pintarAvisosPedidos(); });',
-  '      var wrapChk = el("div", {}, [activoI, lblActivo]);',
-  '      var card = el("div", {class:"card"}, [',
-  '        el("div", {class:"row"}, [field("Nombre", nombreI), field("Telefono", telI)]),',
-  '        wrapChk, btnDel',
-  '      ]);',
-  '      avisosPedidosBox.appendChild(card);',
-  '    });',
-  '  }',
-  '  pintarAvisosPedidos();',
-  '  area.appendChild(avisosPedidosBox);',
-  '  var btnAddAvisoPedido = el("button", {type:"button", text:"+ Agregar persona", class:"btn-secondary"});',
-  '  btnAddAvisoPedido.addEventListener("click", function(){ avisosPedidosList.push({nombre:"Nueva persona", telefono:"", activo:true}); pintarAvisosPedidos(); });',
-  '  area.appendChild(btnAddAvisoPedido);',
   '',
   '  area.appendChild(el("h2", {text:"Promociones por dia de la semana", id:"sec-promos-dia"}));',
   '  var promosDiaData = JSON.parse(JSON.stringify(cfg.promosDia));',
@@ -1049,11 +1082,8 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo["cumplea\u00f1os"].descuentoPresupuestoAMedida = Number(descuentoInput.value) / 100;',
   '    nuevo["cumplea\u00f1os"].se\u00f1aPorcentaje = Number(senaInput.value) / 100;',
   '    nuevo["cumplea\u00f1os"].cuenta = {titular: ctTitular.value, cuit: ctCuit.value, cvu: ctCvu.value, alias: ctAlias.value};',
-  '    nuevo.staff = {cajera:{nombre:cajNombre.value, telefono:cajTel.value}, due\u00f1o:{nombre:duenoNombre.value, telefono:duenoTel.value}, cocina:{nombre:cocinaNombre.value, telefono:cocinaTel.value}, barra:{nombre:barraNombre.value, telefono:barraTel.value}};',
+  '    nuevo.equipo = equipoList;',
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
-  '    nuevo.deliveryConfig = cadetesList;',
-  '    nuevo.avisosReservas = avisosList;',
-  '    nuevo.avisosPedidos = avisosPedidosList;',
   '    nuevo.tacosLibresPublico = {dias: DIAS_KEY.filter(function(d){ return tlpDiasChecks[d].checked; }), precioPersona: Number(tlpPrecioInput.value)};',
   '    nuevo["ofertaCumplea\u00f1osProximo"] = {activo: ofertaCumpleActivo.checked, diasAntes: Number(ofertaCumpleDias.value)};',
   '    nuevo["cumplea\u00f1osCliente"] = {activo: cumpleCliActivo.checked, descuentoPorcentaje: Number(cumpleCliDesc.value), shotsTequilaSiFestejaEnLocal: cumpleCliShots.checked};',
@@ -1244,7 +1274,7 @@ app.post("/webhook", async (req, res) => {
 
     // ¿Este mensaje viene de un cadete que tenemos cargado? Si es así, no lo procesamos
     // con Claude — puede ser la respuesta a una consulta de envío pendiente.
-    const cadetes = config.deliveryConfig || [];
+    const cadetes = equipoConPermiso(config, "esCadeteDelivery");
     const cadeteQueEscribe = cadetes.find((c) => soloDigitos(c.telefono) === soloDigitos(from));
     if (cadeteQueEscribe && message.type === "text") {
       // Lo guardamos en la bandeja de /admin/inbox igual, aunque el cadete no pase por
@@ -1272,9 +1302,7 @@ app.post("/webhook", async (req, res) => {
     // ¿Este mensaje viene de alguien del staff (cajera/dueño) que tiene un comprobante
     // pendiente de confirmar? Si es así, tratamos su respuesta como la confirmación (o
     // rechazo) del pago, y NO lo procesamos como si fuera un cliente hablándole al bot.
-    const staffConfig = config.staff || {};
-    const staffQueEscribe = [staffConfig.cajera, staffConfig.dueño]
-      .filter(Boolean)
+    const staffQueEscribe = equipoConPermiso(config, "confirmaComprobantes")
       .find((s) => soloDigitos(s.telefono) === soloDigitos(from));
     if (staffQueEscribe && message.type === "text") {
       const pendienteComprobante = pendingComprobantes.get(soloDigitos(from));
@@ -1330,7 +1358,8 @@ app.post("/webhook", async (req, res) => {
       });
       saveListaCompras(listaCompras);
 
-      agregarMensajeInbox(from, "cliente", message.text.body, (staffConfig[rolCompras === "salon" ? "cajera" : rolCompras] || {}).nombre);
+      const personaCompras = equipoPorAreaCompras(config, rolCompras);
+      agregarMensajeInbox(from, "cliente", message.text.body, personaCompras ? personaCompras.nombre : "");
       console.log(`Pedido de compras recibido de ${rolCompras} (${from}) — ${itemsNuevos.length} ítem(s) sumados a la lista (${idsSinCantidad.length} sin cantidad clara).`);
 
       if (idsSinCantidad.length > 0 && !aclaracionPendiente) {
@@ -1446,7 +1475,7 @@ app.post("/webhook", async (req, res) => {
     const promosHoy = (config.promosDia && config.promosDia[diaHoy]) ? config.promosDia[diaHoy].filter((p) => p.activa) : [];
     const clientes = loadClientes();
     const perfilCliente = buscarCliente(clientes, from) || null;
-    const esDueño = !!(staffConfig.dueño && staffConfig.dueño.telefono && soloDigitos(staffConfig.dueño.telefono) === soloDigitos(from));
+    const esDueño = equipoConPermiso(config, "esDueño").some((p) => soloDigitos(p.telefono) === soloDigitos(from));
     let replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
     console.log(`Respuesta de Claude generada (${replyText.length} caracteres):`, replyText.slice(0, 200));
 
@@ -1514,9 +1543,8 @@ app.post("/webhook", async (req, res) => {
       // (ver el bloque de arriba), así que acá solo leemos lo que ya está armado.
 
       const rolesFaltantes = ROLES_COMPRAS.filter((r) => !listaCompras.envios[r].recibido);
-      const NOMBRES_ROL_STAFF = { cocina: "cocina", barra: "barra", salon: "cajera" };
       for (const rol of rolesFaltantes) {
-        const staffDelRol = staffConfig[NOMBRES_ROL_STAFF[rol]];
+        const staffDelRol = equipoPorAreaCompras(config, rol);
         const telRol = staffDelRol && soloDigitos(staffDelRol.telefono);
         if (telRol && telRol.length >= 10) {
           await sendWhatsappText(telRol, "¡Hola! 👋 Necesitamos tu lista de compras para hoy — ¿nos la mandás por acá cuando puedas? 🙏");
@@ -1568,45 +1596,25 @@ app.post("/webhook", async (req, res) => {
 
     // Aviso individual al staff (alternativa que sí funciona con Cloud API, que no
     // soporta mandar mensajes a grupos de WhatsApp reales).
-    if (reservaConfirmada && Array.isArray(config.avisosReservas)) {
-      const avisosActivos = config.avisosReservas.filter((a) => a.activo && a.telefono);
+    if (reservaConfirmada) {
+      const avisosActivos = equipoConPermiso(config, "recibeReservas");
       for (const aviso of avisosActivos) {
-        const telLimpio = soloDigitos(aviso.telefono);
-        if (telLimpio && telLimpio.length >= 10) {
-          await sendWhatsappText(telLimpio, reservaConfirmada);
-        } else {
-          console.log(`Aviso de reserva: el teléfono de "${aviso.nombre}" no es válido (${aviso.telefono}), se saltea.`);
-        }
+        await sendWhatsappText(soloDigitos(aviso.telefono), reservaConfirmada);
       }
       if (avisosActivos.length > 0) {
-        console.log(`Aviso de reserva confirmada enviado individualmente a ${avisosActivos.length} persona(s) del staff.`);
+        console.log(`Aviso de reserva confirmada enviado individualmente a ${avisosActivos.length} persona(s) del equipo.`);
       }
     }
 
     if (pedidoConfirmado) {
-      const telCocina = soloDigitos((config.staff && config.staff.cocina && config.staff.cocina.telefono) || "");
-      if (telCocina && telCocina.length >= 10) {
-        await sendWhatsappText(telCocina, pedidoConfirmado);
-        console.log(`Pedido confirmado reenviado a cocina (${telCocina}).`);
-      } else {
-        console.log("Hubo un pedido confirmado pero no hay teléfono de cocina cargado en config.staff.cocina.");
+      const avisosPedido = equipoConPermiso(config, "recibePedidos");
+      for (const aviso of avisosPedido) {
+        await sendWhatsappText(soloDigitos(aviso.telefono), pedidoConfirmado);
       }
-
-      // Aviso adicional a toda la gente que se cargue en la lista de "Aviso de pedidos"
-      // (además de cocina, por si querés que también se entere la cajera, el dueño, etc.).
-      if (Array.isArray(config.avisosPedidos)) {
-        const avisosPedidosActivos = config.avisosPedidos.filter((a) => a.activo && a.telefono);
-        for (const aviso of avisosPedidosActivos) {
-          const telLimpio = soloDigitos(aviso.telefono);
-          if (telLimpio && telLimpio.length >= 10) {
-            await sendWhatsappText(telLimpio, pedidoConfirmado);
-          } else {
-            console.log(`Aviso de pedido: el teléfono de "${aviso.nombre}" no es válido (${aviso.telefono}), se saltea.`);
-          }
-        }
-        if (avisosPedidosActivos.length > 0) {
-          console.log(`Pedido confirmado también enviado a ${avisosPedidosActivos.length} persona(s) de la lista de avisos.`);
-        }
+      if (avisosPedido.length > 0) {
+        console.log(`Pedido confirmado enviado a ${avisosPedido.length} persona(s) del equipo.`);
+      } else {
+        console.log("Hubo un pedido confirmado pero nadie del equipo tiene marcado \"Recibe pedidos\".");
       }
     }
 
@@ -1768,9 +1776,7 @@ app.post("/webhook", async (req, res) => {
     // de confirmación — así, cuando el staff responda, sabemos que es sobre esto y no
     // lo tratamos como si fuera un cliente nuevo escribiéndole al bot.
     if ((message.type === "image" && message.image?.id) || (message.type === "document" && message.document?.id)) {
-      const staff = config.staff || {};
-      const staffPhones = [staff.cajera, staff.dueño]
-        .filter(Boolean)
+      const staffPhones = equipoConPermiso(config, "confirmaComprobantes")
         .map((s) => soloDigitos(s.telefono))
         .filter((tel) => tel && tel.length >= 10);
       const captionAviso = `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación. Contestame acá mismo con "sí" o "no" (o contame el motivo si no es válido) para que se lo reenvíe automáticamente.`;
@@ -3379,7 +3385,8 @@ app.post("/admin/inactivos-data", requireAdminApi, async (req, res) => {
     const clientes = loadClientes();
     const inactivos = calcularClientesInactivos(clientes);
     const config = loadConfig();
-    const telefonoDestino = soloDigitos((config.staff && config.staff.dueño && config.staff.dueño.telefono) || "");
+    const dueñoActual = equipoConPermiso(config, "esDueño")[0];
+    const telefonoDestino = soloDigitos((dueñoActual && dueñoActual.telefono) || "");
 
     let avisoEnviado = false;
     if (inactivos.length > 0 && telefonoDestino && telefonoDestino.length >= 10) {
@@ -3497,7 +3504,8 @@ async function chequearAvisoCumpleañosDiario() {
       });
     }
 
-    const telefonoDestino = soloDigitos(cfg.telefono) || soloDigitos((config.staff && config.staff.dueño && config.staff.dueño.telefono) || "");
+    const dueñoParaCumple = equipoConPermiso(config, "esDueño")[0];
+    const telefonoDestino = soloDigitos(cfg.telefono) || soloDigitos((dueñoParaCumple && dueñoParaCumple.telefono) || "");
     if (telefonoDestino && telefonoDestino.length >= 10) {
       const enviado = await sendWhatsappText(telefonoDestino, mensaje);
       if (enviado) {

@@ -11,7 +11,7 @@ function esCumpleañosHoy(cumpleanosDDMM, fechaHoyISO) {
 
 function buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoyISO, horaActual, perfilCliente, esDueño) {
   const cumple = config["cumpleaños"];
-  const cadetesActivos = (config.deliveryConfig || []).filter((c) => c.activo);
+  const cadetesActivos = (config.equipo || []).filter((p) => p.esCadeteDelivery && p.activo !== false);
 
   const listaPromos = cumple.paquetes
     .map((p) => `- ${p.emoji} ${p.nombre}: ${money(p.precioPersona)} por persona`)
