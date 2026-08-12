@@ -1117,6 +1117,12 @@ const pendingComprobantes = new Map();
 //      {ids: [...ids de ítems sin cantidad clara], rol} ----
 const pendingCantidadCompras = new Map();
 
+// ---- Pedidos esperando confirmación de que ya se cargaron en el sistema (FUDO u otro):
+//      telefonoDeQuienDebeConfirmar (normalizado) -> [{id, resumen, clientePhone, creadaEn}] ----
+const pendingComandas = new Map();
+// Evita avisarle al cliente más de una vez si varias personas confirman el mismo pedido.
+const comandasYaAvisadasAlCliente = new Set();
+
 function soloDigitos(numero) {
   return (numero || "").replace(/[^\d]/g, "");
 }
@@ -1322,6 +1328,60 @@ app.post("/webhook", async (req, res) => {
       }
       // Si no hay ningún comprobante pendiente, dejamos que el mensaje siga el flujo
       // normal (por si el staff quiere probar el bot o hablar como cualquier cliente).
+    }
+
+    // ¿Este mensaje viene de alguien que tiene un pedido pendiente de confirmar? Si es así,
+    // tomamos su respuesta como esa confirmación (no como si fuera un cliente nuevo). El
+    // trato es distinto según el tipo: a cocina se le pregunta si recibió la comanda
+    // impresa (sí/no); al cajero/operador se le pide el número de pedido + link de FUDO,
+    // que se le reenvía tal cual al cliente como confirmación de seguimiento.
+    const telQuienResponde = soloDigitos(from);
+    if (message.type === "text" && pendingComandas.has(telQuienResponde) && pendingComandas.get(telQuienResponde).length > 0) {
+      const cola = pendingComandas.get(telQuienResponde);
+      const confirmado = cola.shift();
+      if (cola.length === 0) {
+        pendingComandas.delete(telQuienResponde);
+      } else {
+        pendingComandas.set(telQuienResponde, cola);
+      }
+
+      const textoRespuesta = message.text.body;
+      const personaQueConfirma = equipoPorTelefono(config, from);
+      agregarMensajeInbox(from, "cliente", textoRespuesta, personaQueConfirma ? personaQueConfirma.nombre : "");
+      console.log(`Comanda ${confirmado.id} (tipo ${confirmado.tipo}) respondida por ${from}: "${textoRespuesta}"`);
+
+      const avisoRestante = cola.length > 0 ? ` Todavía te queda${cola.length === 1 ? "" : "n"} ${cola.length} pedido${cola.length === 1 ? "" : "s"} más por confirmar.` : "";
+
+      if (confirmado.tipo === "cocina") {
+        // Chequeo simple: si la respuesta tiene un "no" como palabra suelta, la tomamos
+        // como negativa; cualquier otra cosa (sí, dale, recibido, etc.) cuenta como positiva.
+        const esNegativo = /(^|\s)no(\s|$|[.,!?])/i.test(textoRespuesta) && !/s[ií]/i.test(textoRespuesta);
+        if (esNegativo) {
+          const cajerosEquipo = equipoConPermiso(config, "recibePedidos").filter((p) => p.areaCompras !== "cocina");
+          for (const cj of cajerosEquipo) {
+            const telCj = soloDigitos(cj.telefono);
+            await sendWhatsappText(
+              telCj,
+              `⚠️ Cocina avisa que NO recibió la comanda impresa de este pedido — ¿podés confirmar que está bien cargado en el sistema y reimprimirla si hace falta?\n\n${confirmado.resumen}`
+            );
+            const colaCj = pendingComandas.get(telCj) || [];
+            colaCj.push({ id: confirmado.id, tipo: "cajero", resumen: confirmado.resumen, clientePhone: confirmado.clientePhone, creadaEn: Date.now() });
+            pendingComandas.set(telCj, colaCj);
+          }
+          await sendWhatsappText(from, `Entendido, ya le avisé a caja/operador para que lo revisen. ¡Gracias por el aviso! 🙏${avisoRestante}`);
+        } else {
+          await sendWhatsappText(from, `¡Perfecto, gracias por confirmar! 🙌${avisoRestante}`);
+        }
+      } else {
+        // Tipo "cajero": le reenviamos su respuesta (número de pedido + link) tal cual al
+        // cliente, solo una vez aunque varias personas confirmen el mismo pedido.
+        if (!comandasYaAvisadasAlCliente.has(confirmado.id)) {
+          comandasYaAvisadasAlCliente.add(confirmado.id);
+          await sendWhatsappText(confirmado.clientePhone, `¡Tu pedido ya está cargado en el sistema! 📦 Podés seguirlo acá:\n\n${textoRespuesta}`);
+        }
+        await sendWhatsappText(from, `¡Buenísimo, gracias! Ya se lo reenvié al cliente. 🙌${avisoRestante}`);
+      }
+      return;
     }
 
     // ¿Este mensaje viene de cocina, barra o salón (cajera)? Si es así, y no era sobre un
@@ -1608,11 +1668,20 @@ app.post("/webhook", async (req, res) => {
 
     if (pedidoConfirmado) {
       const avisosPedido = equipoConPermiso(config, "recibePedidos");
+      const idComanda = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
       for (const aviso of avisosPedido) {
-        await sendWhatsappText(soloDigitos(aviso.telefono), pedidoConfirmado);
+        const telAviso = soloDigitos(aviso.telefono);
+        const esCocina = aviso.areaCompras === "cocina";
+        const mensaje = esCocina
+          ? `${pedidoConfirmado}\n\n¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏`
+          : `${pedidoConfirmado}\n\n¿Me pasás el número de pedido y el link de seguimiento de FUDO para avisarle al cliente? Por ejemplo: "Pedido #5815 - https://..." 🙏`;
+        await sendWhatsappText(telAviso, mensaje);
+        const cola = pendingComandas.get(telAviso) || [];
+        cola.push({ id: idComanda, tipo: esCocina ? "cocina" : "cajero", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
+        pendingComandas.set(telAviso, cola);
       }
       if (avisosPedido.length > 0) {
-        console.log(`Pedido confirmado enviado a ${avisosPedido.length} persona(s) del equipo.`);
+        console.log(`Pedido confirmado enviado a ${avisosPedido.length} persona(s) del equipo, pidiendo confirmación de carga.`);
       } else {
         console.log("Hubo un pedido confirmado pero nadie del equipo tiene marcado \"Recibe pedidos\".");
       }
@@ -3612,5 +3681,30 @@ async function chequearListaEspera() {
 
 setInterval(chequearListaEspera, 15 * 60 * 1000); // cada 15 minutos
 setTimeout(chequearListaEspera, 30 * 1000); // primer chequeo a los 30seg de arrancar
+
+// ==================== Recordatorio de comandas sin confirmar ====================
+async function chequearComandasSinConfirmar() {
+  try {
+    const ahora = Date.now();
+    const QUINCE_MIN = 15 * 60 * 1000;
+    for (const [telefono, cola] of pendingComandas.entries()) {
+      if (cola.length === 0) continue;
+      const masVieja = cola[0];
+      if (ahora - masVieja.creadaEn >= QUINCE_MIN && !masVieja.recordatorioEnviado) {
+        const mensaje = masVieja.tipo === "cocina"
+          ? `¡Che! 👋 ¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏\n\n${masVieja.resumen}`
+          : `¡Che! 👋 ¿Me pasás el número de pedido y el link de FUDO de este pedido, para avisarle al cliente?\n\n${masVieja.resumen}`;
+        await sendWhatsappText(telefono, mensaje);
+        masVieja.recordatorioEnviado = true;
+        console.log(`Recordatorio de comanda sin confirmar enviado a ${telefono} (comanda ${masVieja.id}, tipo ${masVieja.tipo}).`);
+      }
+    }
+  } catch (err) {
+    console.error("Error chequeando comandas sin confirmar:", err);
+  }
+}
+
+setInterval(chequearComandasSinConfirmar, 5 * 60 * 1000); // cada 5 minutos
+setTimeout(chequearComandasSinConfirmar, 40 * 1000); // primer chequeo a los 40seg de arrancar
 
 app.listen(PORT, () => console.log(`Chaparrita backend escuchando en el puerto ${PORT}`));
