@@ -685,6 +685,7 @@ const ADMIN_CONFIG_PAGE = [
   '<a href="#sec-tacos-libres">Tacos libres</a>',
   '<a href="#sec-cadetes">Delivery - cadetes</a>',
   '<a href="#sec-aviso-reservas">Aviso de reservas al staff</a>',
+  '<a href="#sec-aviso-pedidos">Aviso de pedidos</a>',
   '<a href="#sec-promos-dia">Promos por día</a>',
   '<a href="#sec-conocimiento">Base de conocimiento</a>',
   '</nav>',
@@ -942,6 +943,34 @@ const ADMIN_CONFIG_PAGE = [
   '  btnAddAviso.addEventListener("click", function(){ avisosList.push({nombre:"Nueva persona", telefono:"", activo:true}); pintarAvisos(); });',
   '  area.appendChild(btnAddAviso);',
   '',
+  '  area.appendChild(el("h2", {text:"Aviso de pedidos", id:"sec-aviso-pedidos"}));',
+  '  area.appendChild(el("p", {text:"Adem\u00e1s de cocina (arriba), pod\u00e9s sumar m\u00e1s gente que quiera enterarse de cada pedido confirmado (la cajera, vos mismo, etc.). Carg\u00e1 el telefono con codigo de pais y 9 (ej: 549370XXXXXXX).", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var avisosPedidosBox = el("div", {id:"avisosPedidosBox"});',
+  '  var avisosPedidosList = JSON.parse(JSON.stringify(cfg.avisosPedidos || []));',
+  '  function pintarAvisosPedidos() {',
+  '    avisosPedidosBox.innerHTML = "";',
+  '    avisosPedidosList.forEach(function(a, idx) {',
+  '      var nombreI = textInput(a.nombre); nombreI.oninput = function(){ a.nombre = nombreI.value; };',
+  '      var telI = textInput(a.telefono); telI.oninput = function(){ a.telefono = telI.value; };',
+  '      var activoI = el("input", {type:"checkbox"}); activoI.checked = !!a.activo; activoI.onchange = function(){ a.activo = activoI.checked; };',
+  '      var lblActivo = el("label", {text:" Activo (recibe el aviso de pedidos)"});',
+  '      lblActivo.style.display = "inline"; lblActivo.style.fontWeight = "normal";',
+  '      var btnDel = el("button", {type:"button", text:"Eliminar", class:"btn-danger"});',
+  '      btnDel.addEventListener("click", function(){ avisosPedidosList.splice(idx,1); pintarAvisosPedidos(); });',
+  '      var wrapChk = el("div", {}, [activoI, lblActivo]);',
+  '      var card = el("div", {class:"card"}, [',
+  '        el("div", {class:"row"}, [field("Nombre", nombreI), field("Telefono", telI)]),',
+  '        wrapChk, btnDel',
+  '      ]);',
+  '      avisosPedidosBox.appendChild(card);',
+  '    });',
+  '  }',
+  '  pintarAvisosPedidos();',
+  '  area.appendChild(avisosPedidosBox);',
+  '  var btnAddAvisoPedido = el("button", {type:"button", text:"+ Agregar persona", class:"btn-secondary"});',
+  '  btnAddAvisoPedido.addEventListener("click", function(){ avisosPedidosList.push({nombre:"Nueva persona", telefono:"", activo:true}); pintarAvisosPedidos(); });',
+  '  area.appendChild(btnAddAvisoPedido);',
+  '',
   '  area.appendChild(el("h2", {text:"Promociones por dia de la semana", id:"sec-promos-dia"}));',
   '  var promosDiaData = JSON.parse(JSON.stringify(cfg.promosDia));',
   '  var promosDiaBox = el("div", {id:"promosDiaBox"});',
@@ -1024,6 +1053,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
   '    nuevo.deliveryConfig = cadetesList;',
   '    nuevo.avisosReservas = avisosList;',
+  '    nuevo.avisosPedidos = avisosPedidosList;',
   '    nuevo.tacosLibresPublico = {dias: DIAS_KEY.filter(function(d){ return tlpDiasChecks[d].checked; }), precioPersona: Number(tlpPrecioInput.value)};',
   '    nuevo["ofertaCumplea\u00f1osProximo"] = {activo: ofertaCumpleActivo.checked, diasAntes: Number(ofertaCumpleDias.value)};',
   '    nuevo["cumplea\u00f1osCliente"] = {activo: cumpleCliActivo.checked, descuentoPorcentaje: Number(cumpleCliDesc.value), shotsTequilaSiFestejaEnLocal: cumpleCliShots.checked};',
@@ -1560,6 +1590,23 @@ app.post("/webhook", async (req, res) => {
         console.log(`Pedido confirmado reenviado a cocina (${telCocina}).`);
       } else {
         console.log("Hubo un pedido confirmado pero no hay teléfono de cocina cargado en config.staff.cocina.");
+      }
+
+      // Aviso adicional a toda la gente que se cargue en la lista de "Aviso de pedidos"
+      // (además de cocina, por si querés que también se entere la cajera, el dueño, etc.).
+      if (Array.isArray(config.avisosPedidos)) {
+        const avisosPedidosActivos = config.avisosPedidos.filter((a) => a.activo && a.telefono);
+        for (const aviso of avisosPedidosActivos) {
+          const telLimpio = soloDigitos(aviso.telefono);
+          if (telLimpio && telLimpio.length >= 10) {
+            await sendWhatsappText(telLimpio, pedidoConfirmado);
+          } else {
+            console.log(`Aviso de pedido: el teléfono de "${aviso.nombre}" no es válido (${aviso.telefono}), se saltea.`);
+          }
+        }
+        if (avisosPedidosActivos.length > 0) {
+          console.log(`Pedido confirmado también enviado a ${avisosPedidosActivos.length} persona(s) de la lista de avisos.`);
+        }
       }
     }
 
