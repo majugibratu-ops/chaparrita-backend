@@ -1723,6 +1723,13 @@ app.post("/webhook", async (req, res) => {
         cliente.historialPedidos.push({ fecha: new Date().toISOString(), resumen: itemsMatch ? itemsMatch[1].trim() : pedidoConfirmado.slice(0, 200) });
         if (cliente.historialPedidos.length > 10) cliente.historialPedidos = cliente.historialPedidos.slice(-10);
         cliente.cantidadPedidos = (cliente.cantidadPedidos || 0) + 1;
+
+        // Si fue delivery, guardamos la dirección para poder ofrecerla de nuevo la próxima
+        // vez ("¿te la mandamos a tu dirección de siempre?"), sin tener que preguntarla de cero.
+        const direccionMatch = pedidoConfirmado.match(/Entrega:\s*Delivery a (.+)/i);
+        if (direccionMatch) {
+          cliente.ultimaDireccion = direccionMatch[1].trim();
+        }
       }
       cliente.ultimaVez = new Date().toISOString();
       saveClientes(clientes);
