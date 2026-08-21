@@ -147,6 +147,19 @@ function horaActualArgentina() {
   return fmt.format(new Date()); // HH:MM
 }
 
+// Minutos que faltan desde AHORA (hora Argentina) hasta la fecha/hora de una reserva.
+// Negativo si la reserva ya pasó.
+function minutosHastaReserva(fechaISO, horaHHMM) {
+  const ahoraArgentinaStr = new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" });
+  const ahoraArgentina = new Date(ahoraArgentinaStr);
+  const [anio, mes, dia] = fechaISO.split("-").map(Number);
+  const [hh, mm] = horaHHMM.split(":").map(Number);
+  const momentoReserva = new Date(ahoraArgentina.getFullYear(), 0, 1); // placeholder, se pisa abajo
+  momentoReserva.setFullYear(anio, mes - 1, dia);
+  momentoReserva.setHours(hh, mm, 0, 0);
+  return Math.round((momentoReserva - ahoraArgentina) / (1000 * 60));
+}
+
 // ---- Reservas guardadas (para mandar el recordatorio 1hs antes) ----
 const RESERVAS_PATH = path.join(DATA_DIR, "reservas.json");
 function loadReservas() {
@@ -272,6 +285,43 @@ function extractCancelarReservaMarker(text) {
     console.error("No se pudo parsear CANCELAR_RESERVA:", match[1]);
     return { cleanText, cancelacion: null };
   }
+}
+
+// Saca la marca interna [[CONSULTAR_RESUMEN_RESERVAS: {"periodo":"dia|semana|mes"}]]
+function extractResumenReservasMarker(text) {
+  const regex = /\[\[CONSULTAR_RESUMEN_RESERVAS:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, resumenPedido: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    return { cleanText, resumenPedido: JSON.parse(match[1]) };
+  } catch {
+    console.error("No se pudo parsear CONSULTAR_RESUMEN_RESERVAS:", match[1]);
+    return { cleanText, resumenPedido: null };
+  }
+}
+
+// Determina si una reserva cae dentro del "dia", "semana" (Lun-Dom) o "mes" pedido,
+// para filtrar el resumen que solicita Administración/dueño.
+function reservaEstaEnPeriodo(fechaReservaISO, periodo, fechaHoyISO) {
+  const [ay, am, ad] = fechaHoyISO.split("-").map(Number);
+  const [ry, rm, rd] = fechaReservaISO.split("-").map(Number);
+  const hoy = new Date(ay, am - 1, ad);
+  const reserva = new Date(ry, rm - 1, rd);
+  if (periodo === "dia") {
+    return reserva.getTime() === hoy.getTime();
+  }
+  if (periodo === "mes") {
+    return ry === ay && rm === am;
+  }
+  // "semana": de lunes a domingo de la semana actual
+  const diaSemanaHoy = hoy.getDay(); // 0=domingo
+  const offsetHastaLunes = diaSemanaHoy === 0 ? 6 : diaSemanaHoy - 1;
+  const lunes = new Date(hoy);
+  lunes.setDate(hoy.getDate() - offsetHastaLunes);
+  const domingo = new Date(lunes);
+  domingo.setDate(lunes.getDate() + 6);
+  return reserva >= lunes && reserva <= domingo;
 }
 
 // Saca la marca interna [[CONSULTAR_LISTA_COMPRAS]] (sin datos, solo la pide el dueño)
@@ -1372,6 +1422,10 @@ app.post("/webhook", async (req, res) => {
         } else {
           await sendWhatsappText(from, `¡Perfecto, gracias por confirmar! 🙌${avisoRestante}`);
         }
+      } else if (confirmado.tipo === "reserva") {
+        // Control puramente interno: el cliente ya recibió su confirmación normal del
+        // bot cuando se armó la reserva, acá no le mandamos nada más.
+        await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar que quedó agendada! 🙌${avisoRestante}`);
       } else {
         // Tipo "cajero": le reenviamos su respuesta (número de pedido + link) tal cual al
         // cliente, solo una vez aunque varias personas confirmen el mismo pedido.
@@ -1536,7 +1590,10 @@ app.post("/webhook", async (req, res) => {
     const clientes = loadClientes();
     const perfilCliente = buscarCliente(clientes, from) || null;
     const esDueño = equipoConPermiso(config, "esDueño").some((p) => soloDigitos(p.telefono) === soloDigitos(from));
-    let replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
+    // Cualquiera con "Recibe confirmación de reservas" puede pedir el resumen de reservas
+    // (además del dueño, que ya tiene todo lo demás).
+    const esAdminReservas = esDueño || equipoConPermiso(config, "recibeReservas").some((p) => soloDigitos(p.telefono) === soloDigitos(from));
+    let replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas);
     console.log(`Respuesta de Claude generada (${replyText.length} caracteres):`, replyText.slice(0, 200));
 
     // Si Claude necesita saber la disponibilidad real de mesas para seguir la reserva,
@@ -1564,7 +1621,7 @@ app.post("/webhook", async (req, res) => {
           text: `[[DATOS_DISPONIBILIDAD: ${JSON.stringify(disponibilidad)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es el resultado de la consulta de disponibilidad que pediste. Usalo para responder de forma natural y seguir la conversación con el cliente.)`,
         }],
       });
-      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas);
       console.log(`Respuesta de Claude tras consultar disponibilidad (${replyText.length} caracteres):`, replyText.slice(0, 200));
     }
 
@@ -1575,7 +1632,20 @@ app.post("/webhook", async (req, res) => {
     if (quiereConsultarReservas) {
       const reservasCliente = loadReservas()
         .filter((r) => soloDigitos(r.telefono) === soloDigitos(from))
-        .map((r) => ({ id: r.id, fecha: r.fecha, hora: r.hora, personas: r.personas, sector: r.sector }));
+        .map((r) => {
+          const minutosRestantes = minutosHastaReserva(r.fecha, r.hora);
+          return {
+            id: r.id,
+            fecha: r.fecha,
+            hora: r.hora,
+            personas: r.personas,
+            sector: r.sector,
+            promocion: r.promocion || "",
+            puedeCambiarPersonasSectorOFechaHora: minutosRestantes >= 120,
+            puedeCambiarPromoOMenu: minutosRestantes >= 1440,
+            puedeCancelar: minutosRestantes >= 120,
+          };
+        });
       console.log(`Cliente ${from} consultó sus reservas — se encontraron ${reservasCliente.length}.`);
 
       if (sinConsultaReservas) {
@@ -1585,10 +1655,10 @@ app.post("/webhook", async (req, res) => {
         role: "user",
         content: [{
           type: "text",
-          text: `[[DATOS_MIS_RESERVAS: ${JSON.stringify(reservasCliente)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es la lista real de sus reservas cargadas, con el "id" de cada una para poder modificarla o cancelarla si lo pide. Si la lista está vacía, es que no tiene ninguna reserva cargada. Usalo para responder de forma natural.)`,
+          text: `[[DATOS_MIS_RESERVAS: ${JSON.stringify(reservasCliente)}]] (Esto es información interna del sistema, no un mensaje real del cliente — es la lista real de sus reservas cargadas, con el "id" de cada una para poder modificarla o cancelarla si lo pide. Los campos "puedeCambiarPersonasSectorOFechaHora", "puedeCambiarPromoOMenu" y "puedeCancelar" ya tienen calculado si todavía está en horario permitido para cada tipo de cambio (true/false) — confiá en estos valores tal cual, no calcules vos el tiempo restante. Si la lista está vacía, es que no tiene ninguna reserva cargada. Usalo para responder de forma natural.)`,
         }],
       });
-      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas);
       console.log(`Respuesta de Claude tras consultar reservas del cliente (${replyText.length} caracteres):`, replyText.slice(0, 200));
     }
 
@@ -1629,8 +1699,45 @@ app.post("/webhook", async (req, res) => {
           text: `[[DATOS_LISTA_COMPRAS: ${JSON.stringify({ items: listaCompras.items, rolesFaltantes })}]] (Esto es información interna del sistema, no un mensaje real del cliente — es la lista de compras real de hoy, con el "id" de cada ítem para poder marcarlo como comprado si el dueño lo pide. "comprado":true significa que ya se compró. Usalo para responder de forma natural.)`,
         }],
       });
-      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño);
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas);
       console.log(`Respuesta de Claude tras consultar lista de compras (${replyText.length} caracteres):`, replyText.slice(0, 200));
+    }
+
+    // Si Administración/el dueño pidió un resumen de reservas (del día, la semana o el
+    // mes), se lo armamos con los datos reales y se lo mandamos como mensaje aparte,
+    // prolijo, además de la respuesta conversacional.
+    const { cleanText: sinResumenReservas, resumenPedido } = extractResumenReservasMarker(replyText);
+    if (resumenPedido && esAdminReservas) {
+      const periodo = ["dia", "semana", "mes"].includes(resumenPedido.periodo) ? resumenPedido.periodo : "dia";
+      const fechaHoyResumen = fechaDeHoyISOArgentina();
+      const reservasDelPeriodo = loadReservas()
+        .filter((r) => reservaEstaEnPeriodo(r.fecha, periodo, fechaHoyResumen))
+        .sort((a, b) => (a.fecha + a.hora).localeCompare(b.fecha + b.hora));
+
+      const NOMBRE_PERIODO = { dia: "de hoy", semana: "de esta semana", mes: "de este mes" };
+      let mensajeResumen;
+      if (reservasDelPeriodo.length === 0) {
+        mensajeResumen = `📅 No hay reservas cargadas ${NOMBRE_PERIODO[periodo]}.`;
+      } else {
+        mensajeResumen = `📅 *Reservas ${NOMBRE_PERIODO[periodo]}* (${reservasDelPeriodo.length})\n\n`;
+        reservasDelPeriodo.forEach((r) => {
+          mensajeResumen += `• ${r.fecha} ${r.hora}hs — ${r.nombre || "(sin nombre)"} (${r.personas || "?"} pers., ${r.sector || "sector a confirmar"})${r.promocion ? ` — ${r.promocion}` : ""}\n`;
+        });
+      }
+
+      await sendWhatsappText(from, mensajeResumen);
+      agregarMensajeInbox(from, "chaparrita", mensajeResumen);
+      console.log(`Resumen de reservas (${periodo}) enviado a ${from}: ${reservasDelPeriodo.length} reserva(s).`);
+
+      if (sinResumenReservas) {
+        history.push({ role: "assistant", content: [{ type: "text", text: sinResumenReservas }] });
+      }
+      history.push({
+        role: "user",
+        content: [{ type: "text", text: `[[RESUMEN_RESERVAS_ENVIADO]] (Información interna: el resumen ya se mandó como mensaje aparte con el formato prolijo. Solo dale una respuesta corta y natural de cierre, no repitas la lista.)` }],
+      });
+      replyText = await askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas);
+      console.log(`Respuesta de Claude tras enviar resumen de reservas (${replyText.length} caracteres):`, replyText.slice(0, 200));
     }
 
     const { cleanText: sinDatos, datos: datosReserva } = extractReservaDatosMarker(replyText);
@@ -1658,11 +1765,17 @@ app.post("/webhook", async (req, res) => {
     // soporta mandar mensajes a grupos de WhatsApp reales).
     if (reservaConfirmada) {
       const avisosActivos = equipoConPermiso(config, "recibeReservas");
+      const idComandaReserva = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+      const mensajeConSolicitud = `${reservaConfirmada}\n\n¿Me confirmás que ya quedó agendada? Contestame "sí" cuando esté 🙏`;
       for (const aviso of avisosActivos) {
-        await sendWhatsappText(soloDigitos(aviso.telefono), reservaConfirmada);
+        const telAviso = soloDigitos(aviso.telefono);
+        await sendWhatsappText(telAviso, mensajeConSolicitud);
+        const cola = pendingComandas.get(telAviso) || [];
+        cola.push({ id: idComandaReserva, tipo: "reserva", resumen: reservaConfirmada, clientePhone: from, creadaEn: Date.now() });
+        pendingComandas.set(telAviso, cola);
       }
       if (avisosActivos.length > 0) {
-        console.log(`Aviso de reserva confirmada enviado individualmente a ${avisosActivos.length} persona(s) del equipo.`);
+        console.log(`Aviso de reserva confirmada enviado a ${avisosActivos.length} persona(s) del equipo, pidiendo confirmación de agenda.`);
       }
     }
 
@@ -1751,19 +1864,35 @@ app.post("/webhook", async (req, res) => {
 
     if (datosReserva && datosReserva.fecha && datosReserva.hora) {
       const reservas = loadReservas();
-      reservas.push({
-        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
-        telefono: from,
-        nombre: datosReserva.nombre || "",
-        fecha: datosReserva.fecha,
-        hora: datosReserva.hora,
-        sector: (datosReserva.sector || "").toLowerCase(),
-        personas: datosReserva.personas || null,
-        recordatorioEnviado: false,
-        creadaEn: new Date().toISOString(),
-      });
-      saveReservas(reservas);
-      console.log(`Reserva guardada para recordatorio: ${datosReserva.nombre} - ${datosReserva.fecha} ${datosReserva.hora} (sector: ${datosReserva.sector || "sin especificar"})`);
+      // Si ya existe una reserva para este mismo cliente en la misma fecha y hora, la
+      // actualizamos en vez de crear una nueva — evita duplicados si el cliente confirma
+      // más de una vez (por ejemplo, dice "sí" dos veces seguidas).
+      const existente = reservas.find(
+        (r) => soloDigitos(r.telefono) === soloDigitos(from) && r.fecha === datosReserva.fecha && r.hora === datosReserva.hora
+      );
+      if (existente) {
+        existente.nombre = datosReserva.nombre || existente.nombre;
+        existente.sector = (datosReserva.sector || existente.sector || "").toLowerCase();
+        existente.personas = datosReserva.personas || existente.personas;
+        if (datosReserva.promocion) existente.promocion = datosReserva.promocion;
+        saveReservas(reservas);
+        console.log(`Reserva existente actualizada (no duplicada): ${existente.nombre} - ${existente.fecha} ${existente.hora}`);
+      } else {
+        reservas.push({
+          id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          telefono: from,
+          nombre: datosReserva.nombre || "",
+          fecha: datosReserva.fecha,
+          hora: datosReserva.hora,
+          sector: (datosReserva.sector || "").toLowerCase(),
+          personas: datosReserva.personas || null,
+          promocion: datosReserva.promocion || "",
+          recordatorioEnviado: false,
+          creadaEn: new Date().toISOString(),
+        });
+        saveReservas(reservas);
+        console.log(`Reserva guardada para recordatorio: ${datosReserva.nombre} - ${datosReserva.fecha} ${datosReserva.hora} (sector: ${datosReserva.sector || "sin especificar"})`);
+      }
     }
 
     // Si el cliente aceptó anotarse en la lista de espera porque no había mesas disponibles.
@@ -1786,31 +1915,55 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Si el cliente pidió modificar una reserva ya cargada (solo puede tocar las suyas,
-    // verificamos que el teléfono coincida antes de aplicar cualquier cambio).
+    // verificamos que el teléfono coincida antes de aplicar cualquier cambio, y respetamos
+    // las ventanas horarias: 2hs antes para personas/sector/fecha/hora, 24hs para promo/menú).
     if (actualizacion && actualizacion.id) {
       const reservasParaEditar = loadReservas();
       const reservaAEditar = reservasParaEditar.find((r) => r.id === actualizacion.id && soloDigitos(r.telefono) === soloDigitos(from));
       if (reservaAEditar) {
-        const cambioFechaUHora = (actualizacion.fecha && actualizacion.fecha !== reservaAEditar.fecha) || (actualizacion.hora && actualizacion.hora !== reservaAEditar.hora);
-        if (actualizacion.fecha) reservaAEditar.fecha = actualizacion.fecha;
-        if (actualizacion.hora) reservaAEditar.hora = actualizacion.hora;
-        if (actualizacion.personas) reservaAEditar.personas = Number(actualizacion.personas);
-        if (actualizacion.sector) reservaAEditar.sector = actualizacion.sector.toLowerCase();
-        if (cambioFechaUHora) reservaAEditar.recordatorioEnviado = false; // para que el recordatorio salga en el nuevo horario
+        const minutosRestantes = minutosHastaReserva(reservaAEditar.fecha, reservaAEditar.hora);
+        const pideCambioPersonasSectorOFechaHora = actualizacion.fecha || actualizacion.hora || actualizacion.personas || actualizacion.sector;
+        const pideCambioPromo = !!actualizacion.promocion;
+
+        if (pideCambioPersonasSectorOFechaHora && minutosRestantes < 120) {
+          console.log(`Reserva ${reservaAEditar.id}: se rechazó el cambio de personas/sector/fecha/hora — solo faltan ${minutosRestantes} min (mínimo 120).`);
+        } else {
+          const cambioFechaUHora = (actualizacion.fecha && actualizacion.fecha !== reservaAEditar.fecha) || (actualizacion.hora && actualizacion.hora !== reservaAEditar.hora);
+          if (actualizacion.fecha) reservaAEditar.fecha = actualizacion.fecha;
+          if (actualizacion.hora) reservaAEditar.hora = actualizacion.hora;
+          if (actualizacion.personas) reservaAEditar.personas = Number(actualizacion.personas);
+          if (actualizacion.sector) reservaAEditar.sector = actualizacion.sector.toLowerCase();
+          if (cambioFechaUHora) reservaAEditar.recordatorioEnviado = false; // para que el recordatorio salga en el nuevo horario
+        }
+
+        if (pideCambioPromo) {
+          if (minutosRestantes < 1440) {
+            console.log(`Reserva ${reservaAEditar.id}: se rechazó el cambio de promo/menú — solo faltan ${minutosRestantes} min (mínimo 1440).`);
+          } else {
+            reservaAEditar.promocion = actualizacion.promocion;
+          }
+        }
+
         saveReservas(reservasParaEditar);
-        console.log(`Reserva ${reservaAEditar.id} actualizada por el cliente: ${JSON.stringify(actualizacion)}`);
+        console.log(`Reserva ${reservaAEditar.id} procesada (cambios pedidos: ${JSON.stringify(actualizacion)}).`);
       } else {
         console.log(`El cliente ${from} pidió actualizar la reserva ${actualizacion.id}, pero no se encontró o no le pertenece.`);
       }
     }
 
-    // Si el cliente pidió cancelar una reserva ya cargada (misma verificación de seguridad).
+    // Si el cliente pidió cancelar una reserva ya cargada (misma verificación de seguridad,
+    // más la ventana de 2hs antes).
     if (cancelacion && cancelacion.id) {
       const reservasParaCancelar = loadReservas();
-      const existiaYEraDelCliente = reservasParaCancelar.some((r) => r.id === cancelacion.id && soloDigitos(r.telefono) === soloDigitos(from));
-      if (existiaYEraDelCliente) {
-        saveReservas(reservasParaCancelar.filter((r) => r.id !== cancelacion.id));
-        console.log(`Reserva ${cancelacion.id} cancelada por el cliente ${from}.`);
+      const reservaACancelar = reservasParaCancelar.find((r) => r.id === cancelacion.id && soloDigitos(r.telefono) === soloDigitos(from));
+      if (reservaACancelar) {
+        const minutosRestantes = minutosHastaReserva(reservaACancelar.fecha, reservaACancelar.hora);
+        if (minutosRestantes < 120) {
+          console.log(`Reserva ${cancelacion.id}: se rechazó la cancelación — solo faltan ${minutosRestantes} min (mínimo 120).`);
+        } else {
+          saveReservas(reservasParaCancelar.filter((r) => r.id !== cancelacion.id));
+          console.log(`Reserva ${cancelacion.id} cancelada por el cliente ${from}.`);
+        }
       } else {
         console.log(`El cliente ${from} pidió cancelar la reserva ${cancelacion.id}, pero no se encontró o no le pertenece.`);
       }
@@ -1912,7 +2065,7 @@ async function downloadWhatsappMedia(mediaId) {
 }
 
 // ==================== Llamada a la API de Claude ====================
-async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño) {
+async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1923,7 +2076,7 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy,
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
-      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño),
+      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas),
       messages: history,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
@@ -3700,6 +3853,8 @@ async function chequearComandasSinConfirmar() {
       if (ahora - masVieja.creadaEn >= QUINCE_MIN && !masVieja.recordatorioEnviado) {
         const mensaje = masVieja.tipo === "cocina"
           ? `¡Che! 👋 ¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏\n\n${masVieja.resumen}`
+          : masVieja.tipo === "reserva"
+          ? `¡Che! 👋 ¿Me confirmás que esta reserva ya quedó agendada?\n\n${masVieja.resumen}`
           : `¡Che! 👋 ¿Me pasás el número de pedido y el link de FUDO de este pedido, para avisarle al cliente?\n\n${masVieja.resumen}`;
         await sendWhatsappText(telefono, mensaje);
         masVieja.recordatorioEnviado = true;
