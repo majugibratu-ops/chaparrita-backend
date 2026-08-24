@@ -7,7 +7,10 @@ const pdfParse = require("pdf-parse");
 const { buildSystemPrompt } = require("./systemPrompt");
 
 const app = express();
-app.use(express.json());
+// Guardamos el body "crudo" (sin parsear) de cada request en req.rawBody — lo necesitamos
+// para validar la firma de los webhooks de FUDO, que se calcula sobre el body tal cual
+// llegó, antes de que Express lo convierta a objeto JSON.
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -1183,6 +1186,8 @@ const {
   WHATSAPP_PHONE_NUMBER_ID,
   WHATSAPP_VERIFY_TOKEN,
   ADMIN_PASSWORD,
+  FUDO_CLIENT_ID,
+  FUDO_CLIENT_SECRET,
   PORT = 3000,
 } = process.env;
 
@@ -1782,19 +1787,54 @@ app.post("/webhook", async (req, res) => {
     if (pedidoConfirmado) {
       const avisosPedido = equipoConPermiso(config, "recibePedidos");
       const idComanda = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+
+      // Intentamos crear el pedido automáticamente en FUDO primero. Si no se puede (por
+      // cualquier motivo: catálogo no matcheado, error de red, etc.), seguimos con el
+      // flujo manual de siempre — el pedido nunca se pierde.
+      const itemsMatchFudo = pedidoConfirmado.match(/Ítems:\s*(.+)/);
+      const entregaMatchFudo = pedidoConfirmado.match(/Entrega:\s*(Retiro en el local|Delivery a (.+))/i);
+      const esDeliveryFudo = !!(entregaMatchFudo && /delivery/i.test(entregaMatchFudo[1]));
+      const direccionFudo = esDeliveryFudo && entregaMatchFudo[2] ? entregaMatchFudo[2].trim() : "";
+
+      let resultadoFudo = { ok: false };
+      if (itemsMatchFudo) {
+        resultadoFudo = await crearPedidoEnFudo({
+          itemsTexto: itemsMatchFudo[1],
+          nombreCliente: (perfilCliente && perfilCliente.nombre) || "",
+          telefonoCliente: from,
+          tipo: esDeliveryFudo ? "delivery" : "pickup",
+          direccion: direccionFudo,
+        });
+      }
+
       for (const aviso of avisosPedido) {
         const telAviso = soloDigitos(aviso.telefono);
         const esCocina = aviso.areaCompras === "cocina";
-        const mensaje = esCocina
-          ? `${pedidoConfirmado}\n\n¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏`
-          : `${pedidoConfirmado}\n\n¿Me pasás el número de pedido y el link de seguimiento de FUDO para avisarle al cliente? Por ejemplo: "Pedido #5815 - https://..." 🙏`;
-        await sendWhatsappText(telAviso, mensaje);
-        const cola = pendingComandas.get(telAviso) || [];
-        cola.push({ id: idComanda, tipo: esCocina ? "cocina" : "cajero", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
-        pendingComandas.set(telAviso, cola);
+        if (esCocina) {
+          // A cocina siempre le seguimos preguntando si le llegó la comanda impresa,
+          // sin importar si FUDO se cargó solo o no.
+          await sendWhatsappText(telAviso, `${pedidoConfirmado}\n\n¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏`);
+          const cola = pendingComandas.get(telAviso) || [];
+          cola.push({ id: idComanda, tipo: "cocina", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
+          pendingComandas.set(telAviso, cola);
+        } else if (resultadoFudo.ok) {
+          // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle que
+          // tipee el número de pedido a mano.
+          await sendWhatsappText(telAviso, `✅ Este pedido ya se cargó solo en FUDO (orden #${resultadoFudo.fudoOrderId}):\n\n${pedidoConfirmado}`);
+        } else {
+          await sendWhatsappText(telAviso, `${pedidoConfirmado}\n\n¿Me pasás el número de pedido y el link de seguimiento de FUDO para avisarle al cliente? Por ejemplo: "Pedido #5815 - https://..." 🙏`);
+          const cola = pendingComandas.get(telAviso) || [];
+          cola.push({ id: idComanda, tipo: "cajero", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
+          pendingComandas.set(telAviso, cola);
+        }
       }
+
+      if (resultadoFudo.ok) {
+        await sendWhatsappText(from, `¡Tu pedido ya está cargado en el sistema! 📦 Número de orden: #${resultadoFudo.fudoOrderId}`);
+      }
+
       if (avisosPedido.length > 0) {
-        console.log(`Pedido confirmado enviado a ${avisosPedido.length} persona(s) del equipo, pidiendo confirmación de carga.`);
+        console.log(`Pedido confirmado enviado a ${avisosPedido.length} persona(s) del equipo (FUDO: ${resultadoFudo.ok ? "creado automáticamente" : "falló, flujo manual"}).`);
       } else {
         console.log("Hubo un pedido confirmado pero nadie del equipo tiene marcado \"Recibe pedidos\".");
       }
@@ -3868,5 +3908,210 @@ async function chequearComandasSinConfirmar() {
 
 setInterval(chequearComandasSinConfirmar, 5 * 60 * 1000); // cada 5 minutos
 setTimeout(chequearComandasSinConfirmar, 40 * 1000); // primer chequeo a los 40seg de arrancar
+
+// ==================== Integración con FUDO (POS) ====================
+// Documentación: https://dev.fu.do/integrations-api/#overview
+const FUDO_API_BASE = "https://integrations.fu.do/fudo";
+
+let fudoToken = null;
+let fudoTokenExpiraEn = 0; // timestamp en ms
+
+async function getFudoToken() {
+  if (fudoToken && Date.now() < fudoTokenExpiraEn) {
+    return fudoToken;
+  }
+  if (!FUDO_CLIENT_ID || !FUDO_CLIENT_SECRET) {
+    console.error("Faltan FUDO_CLIENT_ID / FUDO_CLIENT_SECRET en las variables de entorno de Railway.");
+    return null;
+  }
+  try {
+    const response = await fetch(`${FUDO_API_BASE}/auth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: FUDO_CLIENT_ID, clientSecret: FUDO_CLIENT_SECRET }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.token) {
+      console.error("Error obteniendo token de FUDO:", JSON.stringify(data));
+      return null;
+    }
+    fudoToken = data.token;
+    // El token dura 24hs — lo renovamos un poco antes (23hs) para no arriesgarnos al límite.
+    fudoTokenExpiraEn = Date.now() + 23 * 60 * 60 * 1000;
+    console.log("Token de FUDO renovado correctamente.");
+    return fudoToken;
+  } catch (err) {
+    console.error("Error de red obteniendo token de FUDO:", err);
+    return null;
+  }
+}
+
+async function fudoFetch(rutaRelativa, options = {}) {
+  const token = await getFudoToken();
+  if (!token) return null;
+  try {
+    const response = await fetch(`${FUDO_API_BASE}${rutaRelativa}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        "Fudo-External-App-Authorization": `Bearer ${token}`,
+        ...(options.headers || {}),
+      },
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      console.error(`Error en FUDO (${rutaRelativa}):`, response.status, JSON.stringify(data));
+      return null;
+    }
+    return data;
+  } catch (err) {
+    console.error(`Error de red llamando a FUDO (${rutaRelativa}):`, err);
+    return null;
+  }
+}
+
+// ---- Catálogo de productos de FUDO (se cachea 30 minutos, para no pedirlo en cada pedido) ----
+let fudoProductosCache = null;
+let fudoProductosCacheEn = 0;
+
+async function getFudoProductos() {
+  if (fudoProductosCache && Date.now() - fudoProductosCacheEn < 30 * 60 * 1000) {
+    return fudoProductosCache;
+  }
+  const data = await fudoFetch("/products");
+  if (data && Array.isArray(data.products)) {
+    fudoProductosCache = data.products.filter((p) => p.active !== false);
+    fudoProductosCacheEn = Date.now();
+    console.log(`Catálogo de FUDO actualizado: ${fudoProductosCache.length} producto(s) activos.`);
+    return fudoProductosCache;
+  }
+  return fudoProductosCache || [];
+}
+
+// Llamada aparte a Claude para "traducir" los ítems que pidió el cliente (texto libre) a
+// los productos reales de FUDO con su ID exacto — la API de FUDO necesita el id numérico
+// de cada producto, no el nombre en texto.
+const FUDO_MATCH_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de un pedido de un restaurante mexicano con el catálogo real de productos de su sistema (FUDO). Te paso la lista de ítems que pidió el cliente (en texto libre) y el catálogo completo de productos con sus IDs reales.
+
+Tu trabajo es, para cada ítem pedido, encontrar el producto que mejor corresponda en el catálogo (por nombre, aunque no sea idéntico) y devolver su ID real, la cantidad pedida, y el precio del catálogo (nunca inventes precios, usá el que aparece en el catálogo).
+
+Si un ítem pedido NO tiene ningún producto razonable en el catálogo, marcalo como no encontrado (no inventes un ID falso).
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"items": [{"productId": 12, "quantity": 2, "price": 8500, "encontrado": true}, {"encontrado": false, "textoOriginal": "algo que no está en el catálogo"}]}`;
+
+async function matchearItemsConFudo(itemsTexto, productosFudo) {
+  try {
+    const catalogoTexto = productosFudo.map((p) => `id:${p.id} - ${p.name} - $${p.price}`).join("\n");
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1200,
+        system: FUDO_MATCH_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: `Ítems pedidos:\n${itemsTexto}\n\nCatálogo de FUDO:\n${catalogoTexto}` }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al matchear ítems con FUDO:", data);
+      return [];
+    }
+    const textoRespuesta = (data.content || [])
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.items || [];
+  } catch (err) {
+    console.error("Error matcheando ítems con FUDO:", err);
+    return [];
+  }
+}
+
+// Crea el pedido en FUDO. Devuelve {ok:true, fudoOrderId} si salió bien, o {ok:false,
+// motivo} si no — en ese caso seguimos con el flujo manual de siempre, como respaldo,
+// nunca se pierde el pedido por un problema de la integración.
+async function crearPedidoEnFudo({ itemsTexto, nombreCliente, telefonoCliente, tipo, direccion, costoEnvio, medioPagoId, totalAprox }) {
+  const productosFudo = await getFudoProductos();
+  if (productosFudo.length === 0) {
+    console.log("No se pudo obtener el catálogo de FUDO — se omite la creación automática del pedido.");
+    return { ok: false, motivo: "sin_catalogo" };
+  }
+
+  const itemsMatcheados = await matchearItemsConFudo(itemsTexto, productosFudo);
+  const itemsEncontrados = itemsMatcheados.filter((i) => i.encontrado && i.productId);
+  const itemsNoEncontrados = itemsMatcheados.filter((i) => !i.encontrado);
+
+  if (itemsEncontrados.length === 0) {
+    console.log("No se pudo emparejar ningún ítem del pedido con el catálogo de FUDO.");
+    return { ok: false, motivo: "sin_matches" };
+  }
+
+  const orderBody = {
+    order: {
+      comment: `Pedido vía WhatsApp (Chaparrita IA) — Cliente: ${nombreCliente || "sin nombre"}`,
+      customer: { name: nombreCliente || "Cliente WhatsApp", phone: telefonoCliente || "" },
+      items: itemsEncontrados.map((i) => ({ quantity: i.quantity || 1, price: i.price || 0, product: { id: i.productId } })),
+      type: tipo === "delivery" ? "delivery" : "pickup",
+      people: 1,
+    },
+  };
+
+  if (tipo === "delivery") {
+    orderBody.order.typeOptions = { address: direccion || "" };
+    if (costoEnvio) orderBody.order.shippingCost = Number(costoEnvio);
+  }
+  if (medioPagoId) {
+    orderBody.order.payment = { paymentMethod: { id: Number(medioPagoId) }, total: Number(totalAprox) || 0 };
+  }
+
+  const resultado = await fudoFetch("/orders", { method: "POST", body: JSON.stringify(orderBody) });
+
+  if (resultado && resultado.order && resultado.order.id) {
+    console.log(`Pedido creado en FUDO automáticamente — ID: ${resultado.order.id}.`);
+    return { ok: true, fudoOrderId: resultado.order.id, itemsNoEncontrados };
+  }
+  console.log("No se pudo crear el pedido en FUDO (ver error arriba) — se sigue con el flujo manual.");
+  return { ok: false, motivo: "error_api", itemsNoEncontrados };
+}
+
+// ---- Webhook de FUDO: nos avisa cuando cambia el estado de un pedido ----
+function validarFirmaFudo(rawBody, firmaRecibida) {
+  if (!FUDO_CLIENT_SECRET || !firmaRecibida || !rawBody) return false;
+  const esperada = crypto.createHmac("sha256", FUDO_CLIENT_SECRET).update(rawBody).digest("hex");
+  try {
+    return crypto.timingSafeEqual(Buffer.from(esperada), Buffer.from(firmaRecibida));
+  } catch {
+    return false; // longitudes distintas u otro problema — tratamos como inválida
+  }
+}
+
+app.post("/webhook/fudo", async (req, res) => {
+  try {
+    const firma = req.headers["fudo-signature"];
+    if (!validarFirmaFudo(req.rawBody, firma)) {
+      console.error("Webhook de FUDO con firma inválida — se ignora (posible intento falso).");
+      return res.status(401).json({ error: "Firma inválida" });
+    }
+
+    const evento = req.body || {};
+    console.log("Webhook de FUDO recibido:", JSON.stringify(evento).slice(0, 300));
+    // TODO: cuando tengamos el mapeo de "id de pedido de FUDO" -> "teléfono del cliente"
+    // guardado, acá se le puede avisar al cliente por WhatsApp el cambio de estado.
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Error procesando webhook de FUDO:", err);
+    res.status(500).json({ error: "Error interno" });
+  }
+});
 
 app.listen(PORT, () => console.log(`Chaparrita backend escuchando en el puerto ${PORT}`));
