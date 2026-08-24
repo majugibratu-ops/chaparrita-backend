@@ -4299,8 +4299,14 @@ app.post("/webhook/fudo", async (req, res) => {
 
     // Buscamos el tipo de evento y el id del pedido en los lugares más probables del
     // payload — como todavía no vimos un ejemplo real, cubrimos varias posibilidades.
-    const tipoEvento = evento.event || evento.type || evento.eventType || "";
-    const fudoOrderId = (evento.order && evento.order.id) || evento.orderId || evento.id;
+    // Confirmado con un webhook real: FUDO manda {"name":"ORDER-REJECTED", "resources":
+    // {"order":{"id":1387}}} — dejamos las otras variantes como respaldo, por si acaso.
+    const tipoEvento = evento.name || evento.event || evento.type || evento.eventType || "";
+    const fudoOrderId =
+      (evento.resources && evento.resources.order && evento.resources.order.id) ||
+      (evento.order && evento.order.id) ||
+      evento.orderId ||
+      evento.id;
 
     const MENSAJES_POR_EVENTO = {
       "ORDER-CONFIRMED": "¡Tu pedido fue confirmado por el local! 🎉 Ya lo estamos preparando.",
