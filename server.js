@@ -1514,8 +1514,13 @@ app.post("/webhook", async (req, res) => {
     // trato es distinto según el tipo: a cocina se le pregunta si recibió la comanda
     // impresa (sí/no); al cajero/operador se le pide el número de pedido + link de FUDO,
     // que se le reenvía tal cual al cliente como confirmación de seguimiento.
+    // Importante: si el mensaje es largo o tiene varios renglones, probablemente NO sea
+    // una confirmación corta sino, por ejemplo, la lista de compras de cocina/barra/salón
+    // — en ese caso lo dejamos pasar de largo para que lo procese esa otra parte del código,
+    // en vez de "comerse" el mensaje acá.
     const telQuienResponde = soloDigitos(from);
-    if (message.type === "text" && pendingComandas.has(telQuienResponde) && pendingComandas.get(telQuienResponde).length > 0) {
+    const pareceConfirmacionCorta = message.type === "text" && message.text.body.trim().length <= 60 && (message.text.body.match(/\n/g) || []).length <= 1;
+    if (pareceConfirmacionCorta && pendingComandas.has(telQuienResponde) && pendingComandas.get(telQuienResponde).length > 0) {
       const cola = pendingComandas.get(telQuienResponde);
       const confirmado = cola.shift();
       if (cola.length === 0) {
@@ -1531,27 +1536,7 @@ app.post("/webhook", async (req, res) => {
 
       const avisoRestante = cola.length > 0 ? ` Todavía te queda${cola.length === 1 ? "" : "n"} ${cola.length} pedido${cola.length === 1 ? "" : "s"} más por confirmar.` : "";
 
-      if (confirmado.tipo === "cocina") {
-        // Chequeo simple: si la respuesta tiene un "no" como palabra suelta, la tomamos
-        // como negativa; cualquier otra cosa (sí, dale, recibido, etc.) cuenta como positiva.
-        const esNegativo = /(^|\s)no(\s|$|[.,!?])/i.test(textoRespuesta) && !/s[ií]/i.test(textoRespuesta);
-        if (esNegativo) {
-          const cajerosEquipo = equipoConPermiso(config, "recibePedidos").filter((p) => p.areaCompras !== "cocina");
-          for (const cj of cajerosEquipo) {
-            const telCj = soloDigitos(cj.telefono);
-            await sendWhatsappText(
-              telCj,
-              `⚠️ Cocina avisa que NO recibió la comanda impresa de este pedido — ¿podés confirmar que está bien cargado en el sistema y reimprimirla si hace falta?\n\n${confirmado.resumen}`
-            );
-            const colaCj = pendingComandas.get(telCj) || [];
-            colaCj.push({ id: confirmado.id, tipo: "cajero", resumen: confirmado.resumen, clientePhone: confirmado.clientePhone, creadaEn: Date.now() });
-            pendingComandas.set(telCj, colaCj);
-          }
-          await sendWhatsappText(from, `Entendido, ya le avisé a caja/operador para que lo revisen. ¡Gracias por el aviso! 🙏${avisoRestante}`);
-        } else {
-          await sendWhatsappText(from, `¡Perfecto, gracias por confirmar! 🙌${avisoRestante}`);
-        }
-      } else if (confirmado.tipo === "reserva") {
+      if (confirmado.tipo === "reserva") {
         // Control puramente interno: el cliente ya recibió su confirmación normal del
         // bot cuando se armó la reserva, acá no le mandamos nada más.
         await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar que quedó agendada! 🙌${avisoRestante}`);
@@ -1975,12 +1960,8 @@ app.post("/webhook", async (req, res) => {
         const telAviso = soloDigitos(aviso.telefono);
         const esCocina = aviso.areaCompras === "cocina";
         if (esCocina) {
-          // A cocina siempre le seguimos preguntando si le llegó la comanda impresa,
-          // sin importar si FUDO se cargó solo o no.
-          await sendWhatsappText(telAviso, `${pedidoConfirmado}\n\n¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏`);
-          const cola = pendingComandas.get(telAviso) || [];
-          cola.push({ id: idComanda, tipo: "cocina", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
-          pendingComandas.set(telAviso, cola);
+          // A cocina le llega el pedido normal, sin pedirle que confirme nada.
+          await sendWhatsappText(telAviso, pedidoConfirmado);
         } else if (resultadoFudo.ok) {
           // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle que
           // tipee el número de pedido a mano.
@@ -4063,9 +4044,7 @@ async function chequearComandasSinConfirmar() {
       if (cola.length === 0) continue;
       const masVieja = cola[0];
       if (ahora - masVieja.creadaEn >= QUINCE_MIN && !masVieja.recordatorioEnviado) {
-        const mensaje = masVieja.tipo === "cocina"
-          ? `¡Che! 👋 ¿Recibiste la comanda impresa de este pedido? Contestame "sí" o "no" 🙏\n\n${masVieja.resumen}`
-          : masVieja.tipo === "reserva"
+        const mensaje = masVieja.tipo === "reserva"
           ? `¡Che! 👋 ¿Me confirmás que esta reserva ya quedó agendada?\n\n${masVieja.resumen}`
           : `¡Che! 👋 ¿Me pasás el número de pedido y el link de FUDO de este pedido, para avisarle al cliente?\n\n${masVieja.resumen}`;
         await sendWhatsappText(telefono, mensaje);
