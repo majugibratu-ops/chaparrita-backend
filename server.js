@@ -1277,6 +1277,17 @@ const comandasYaAvisadasAlCliente = new Set();
 const ultimoPedidoConfirmadoPorCliente = new Map();
 const VENTANA_DEDUP_PEDIDO_MS = 15 * 60 * 1000; // 15 minutos
 
+// Saca espacios de más, tildes/mayúsculas y signos, para comparar solo el contenido real
+// y no fallar por diferencias mínimas de formato entre una confirmación y otra.
+function normalizarParaComparar(texto) {
+  return (texto || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // saca tildes
+    .replace(/[.,;:$]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function soloDigitos(numero) {
   return (numero || "").replace(/[^\d]/g, "");
 }
@@ -1890,19 +1901,25 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (pedidoConfirmado) {
-      // Si es exactamente el mismo pedido que ya procesamos hace poco para este mismo
-      // cliente (por ejemplo, escribió "sí" o "confirmo" varias veces seguidas), no lo
-      // volvemos a cargar ni a avisarle a nadie de nuevo — se ignora silenciosamente.
+      // Si es (aproximadamente) el mismo pedido que ya procesamos hace poco para este
+      // mismo cliente (por ejemplo, escribió "sí" o "confirmo" varias veces seguidas),
+      // no lo volvemos a cargar ni a avisarle a nadie de nuevo. Comparamos solo los
+      // ÍTEMS normalizados (no el texto completo), porque el resto del resumen (total,
+      // forma de pago) puede salir con formato levemente distinto entre una respuesta
+      // de Claude y otra, aunque sea el mismo pedido de fondo.
+      const itemsDeEstePedido = (pedidoConfirmado.match(/Ítems:\s*(.+)/i) || [])[1] || pedidoConfirmado;
+      const itemsNormalizados = normalizarParaComparar(itemsDeEstePedido);
       const registroAnterior = ultimoPedidoConfirmadoPorCliente.get(soloDigitos(from));
+      const msDesdeUltimoPedido = registroAnterior ? Date.now() - registroAnterior.procesadoEn : Infinity;
       const esPedidoDuplicado =
         registroAnterior &&
-        registroAnterior.resumen === pedidoConfirmado &&
-        Date.now() - registroAnterior.procesadoEn < VENTANA_DEDUP_PEDIDO_MS;
+        ((registroAnterior.itemsNormalizados === itemsNormalizados && msDesdeUltimoPedido < VENTANA_DEDUP_PEDIDO_MS) ||
+          msDesdeUltimoPedido < 90 * 1000); // enfriamiento corto extra, sin importar el contenido
 
       if (esPedidoDuplicado) {
-        console.log(`Pedido duplicado detectado para ${from} (ya se había procesado hace ${Math.round((Date.now() - registroAnterior.procesadoEn) / 1000)}s) — se ignora, no se vuelve a cargar.`);
+        console.log(`Pedido duplicado detectado para ${from} (hace ${Math.round(msDesdeUltimoPedido / 1000)}s) — se ignora, no se vuelve a cargar.`);
       } else {
-        ultimoPedidoConfirmadoPorCliente.set(soloDigitos(from), { resumen: pedidoConfirmado, procesadoEn: Date.now() });
+        ultimoPedidoConfirmadoPorCliente.set(soloDigitos(from), { itemsNormalizados, procesadoEn: Date.now() });
 
       const avisosPedido = equipoConPermiso(config, "recibePedidos");
       const idComanda = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
