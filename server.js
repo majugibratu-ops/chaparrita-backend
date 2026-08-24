@@ -135,6 +135,54 @@ function loadMenuText() {
   }
 }
 
+// Arma el texto del menú directamente con los precios REALES de FUDO (en vez del PDF
+// cargado a mano, que se puede desactualizar). Devuelve null si no se pudo traer el
+// catálogo de FUDO por algún motivo — en ese caso el que llama usa el PDF como respaldo.
+// Se cachea 30 minutos para no llamar a la API de FUDO en cada mensaje.
+let menuFudoCache = null;
+let menuFudoCacheEn = 0;
+
+async function construirMenuDesdeFudo() {
+  if (menuFudoCache && Date.now() - menuFudoCacheEn < 30 * 60 * 1000) {
+    return menuFudoCache;
+  }
+
+  const productos = await getFudoProductos();
+  if (!productos || productos.length === 0) return menuFudoCache; // si falla, devolvemos lo último que teníamos cacheado (o null)
+
+  let categorias = [];
+  try {
+    const dataCategorias = await fudoFetch("/product-categories");
+    categorias = (dataCategorias && dataCategorias.productCategories) || [];
+  } catch {
+    categorias = [];
+  }
+  const nombreCategoria = (id) => {
+    const cat = categorias.find((c) => c.id === id);
+    return cat ? cat.name : "Otros";
+  };
+
+  const porCategoria = {};
+  productos.forEach((p) => {
+    const cat = nombreCategoria(p.productCategoryId);
+    if (!porCategoria[cat]) porCategoria[cat] = [];
+    porCategoria[cat].push(p);
+  });
+
+  let texto = "";
+  Object.keys(porCategoria).forEach((cat) => {
+    texto += `\n${cat}\n`;
+    porCategoria[cat].forEach((p) => {
+      texto += `- ${p.name}: $${p.price}\n`;
+    });
+  });
+
+  menuFudoCache = texto.trim();
+  menuFudoCacheEn = Date.now();
+  console.log("Menú en vivo de FUDO actualizado y cacheado.");
+  return menuFudoCache;
+}
+
 function diaDeHoyArgentina() {
   const dia = new Intl.DateTimeFormat("es-AR", { weekday: "long", timeZone: "America/Argentina/Buenos_Aires" }).format(new Date());
   return dia.charAt(0).toUpperCase() + dia.slice(1);
@@ -1597,7 +1645,11 @@ app.post("/webhook", async (req, res) => {
     const history = conversations.get(from) || [];
     history.push({ role: "user", content: contentBlocks });
 
-    const menuText = loadMenuText();
+    // Preferimos el menú con precios REALES de FUDO (para que nunca se desincronice con
+    // lo que después se carga en el pedido); si por algún motivo no se puede traer,
+    // usamos el PDF cargado a mano como respaldo.
+    const menuFudo = await construirMenuDesdeFudo();
+    const menuText = menuFudo || loadMenuText();
     const diaHoy = diaDeHoyArgentina();
     const fechaHoy = fechaDeHoyISOArgentina();
     const horaActual = horaActualArgentina();
