@@ -829,6 +829,7 @@ const ADMIN_CONFIG_PAGE = [
   '<a href="#sec-tacos-libres">Tacos libres</a>',
   '<a href="#sec-promos-dia">Promos por día</a>',
   '<a href="#sec-conocimiento">Base de conocimiento</a>',
+  '<a href="#sec-fudo">Integración con FUDO</a>',
   '</nav>',
   '<main class="config-main">',
   '<a class="volver" href="/admin">← Volver al panel</a>',
@@ -1118,6 +1119,14 @@ const ADMIN_CONFIG_PAGE = [
   '  btnAddConocimiento.addEventListener("click", function(){ conocimientoList.push({pregunta:"", respuesta:""}); pintarConocimiento(); });',
   '  area.appendChild(btnAddConocimiento);',
   '',
+  '  area.appendChild(el("h2", {text:"Integraci\u00f3n con FUDO", id:"sec-fudo"}));',
+  '  area.appendChild(el("p", {text:"IDs de los medios de pago en FUDO (los ves en Fudo, secci\u00f3n Finanzas \u2192 Medios de pago), para que el pedido se cargue con el medio de pago correcto.", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var fudoPagos = cfg.fudoMediosPago || {efectivo:"", transferencia:"", linkDePago:""};',
+  '  var fudoEfectivoInput = numInput(fudoPagos.efectivo);',
+  '  var fudoTransferenciaInput = numInput(fudoPagos.transferencia);',
+  '  var fudoLinkInput = numInput(fudoPagos.linkDePago);',
+  '  area.appendChild(el("div", {class:"row"}, [field("ID de Efectivo", fudoEfectivoInput), field("ID de Transferencia", fudoTransferenciaInput), field("ID de Link de pago", fudoLinkInput)]));',
+  '',
   '  var btnGuardar = el("button", {type:"button", text:"Guardar todos los cambios", class:"btn-primary"});',
   '  btnGuardar.style.marginTop = "24px";',
   '  btnGuardar.style.width = "100%";',
@@ -1143,6 +1152,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.avisoCumpleañosDiario = {activo: avisoCumpleActivo.checked, telefono: avisoCumpleTel.value, hora: avisoCumpleHora.value};',
   '    nuevo.promosDia = promosDiaData;',
   '    nuevo.baseConocimiento = conocimientoList;',
+  '    nuevo.fudoMediosPago = {efectivo: fudoEfectivoInput.value, transferencia: fudoTransferenciaInput.value, linkDePago: fudoLinkInput.value};',
   '    document.getElementById("msg").textContent = "Guardando...";',
   '    document.getElementById("msg").className = "";',
   '    fetch("/admin/config-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({config: nuevo})})',
@@ -1796,6 +1806,19 @@ app.post("/webhook", async (req, res) => {
       const esDeliveryFudo = !!(entregaMatchFudo && /delivery/i.test(entregaMatchFudo[1]));
       const direccionFudo = esDeliveryFudo && entregaMatchFudo[2] ? entregaMatchFudo[2].trim() : "";
 
+      // Mapeamos la forma de pago en texto libre al ID numérico que usa FUDO internamente.
+      const formaPagoMatchFudo = pedidoConfirmado.match(/Forma de pago:\s*(.+)/i);
+      const totalMatchFudo = pedidoConfirmado.match(/Total aproximado:\s*\$?\s*([\d.,]+)/i);
+      const mediosPagoFudo = config.fudoMediosPago || {};
+      let medioPagoIdFudo = null;
+      if (formaPagoMatchFudo) {
+        const textoForma = formaPagoMatchFudo[1].toLowerCase();
+        if (textoForma.includes("efectivo")) medioPagoIdFudo = mediosPagoFudo.efectivo;
+        else if (textoForma.includes("transfer")) medioPagoIdFudo = mediosPagoFudo.transferencia;
+        else if (textoForma.includes("link")) medioPagoIdFudo = mediosPagoFudo.linkDePago;
+      }
+      const totalAproxFudo = totalMatchFudo ? totalMatchFudo[1].replace(/\./g, "").replace(",", ".") : null;
+
       let resultadoFudo = { ok: false };
       if (itemsMatchFudo) {
         resultadoFudo = await crearPedidoEnFudo({
@@ -1804,6 +1827,8 @@ app.post("/webhook", async (req, res) => {
           telefonoCliente: from,
           tipo: esDeliveryFudo ? "delivery" : "pickup",
           direccion: direccionFudo,
+          medioPagoId: medioPagoIdFudo,
+          totalAprox: totalAproxFudo,
         });
       }
 
