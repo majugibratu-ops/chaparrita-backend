@@ -3953,7 +3953,7 @@ async function getFudoToken() {
     const response = await fetch(`${FUDO_API_BASE}/auth`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId: FUDO_CLIENT_ID, clientSecret: FUDO_CLIENT_SECRET }),
+      body: JSON.stringify({ clientId: (FUDO_CLIENT_ID || "").trim(), clientSecret: (FUDO_CLIENT_SECRET || "").trim() }),
     });
     const data = await response.json();
     if (!response.ok || !data.token) {
