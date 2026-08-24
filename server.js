@@ -1288,6 +1288,18 @@ function normalizarParaComparar(texto) {
     .trim();
 }
 
+// Igual que normalizarParaComparar, pero además ordena los ítems alfabéticamente antes de
+// comparar — así, si Claude lista los mismos productos en distinto orden entre una
+// confirmación y otra, igual los reconocemos como el mismo pedido.
+function normalizarItemsParaComparar(itemsTexto) {
+  return (itemsTexto || "")
+    .split(",") // separamos por coma ANTES de normalizar, porque normalizarParaComparar saca las comas
+    .map((parte) => normalizarParaComparar(parte))
+    .filter(Boolean)
+    .sort()
+    .join(",");
+}
+
 function soloDigitos(numero) {
   return (numero || "").replace(/[^\d]/g, "");
 }
@@ -1904,17 +1916,18 @@ app.post("/webhook", async (req, res) => {
       // Si es (aproximadamente) el mismo pedido que ya procesamos hace poco para este
       // mismo cliente (por ejemplo, escribió "sí" o "confirmo" varias veces seguidas),
       // no lo volvemos a cargar ni a avisarle a nadie de nuevo. Comparamos solo los
-      // ÍTEMS normalizados (no el texto completo), porque el resto del resumen (total,
-      // forma de pago) puede salir con formato levemente distinto entre una respuesta
-      // de Claude y otra, aunque sea el mismo pedido de fondo.
+      // ÍTEMS normalizados y ordenados alfabéticamente (no el texto completo del resumen,
+      // ni el orden en que Claude los haya listado), para no fallar por diferencias
+      // mínimas de formato entre una confirmación y otra, sin bloquear un pedido
+      // genuinamente distinto que llegue poco después de otro.
       const itemsDeEstePedido = (pedidoConfirmado.match(/Ítems:\s*(.+)/i) || [])[1] || pedidoConfirmado;
-      const itemsNormalizados = normalizarParaComparar(itemsDeEstePedido);
+      const itemsNormalizados = normalizarItemsParaComparar(itemsDeEstePedido);
       const registroAnterior = ultimoPedidoConfirmadoPorCliente.get(soloDigitos(from));
       const msDesdeUltimoPedido = registroAnterior ? Date.now() - registroAnterior.procesadoEn : Infinity;
       const esPedidoDuplicado =
         registroAnterior &&
-        ((registroAnterior.itemsNormalizados === itemsNormalizados && msDesdeUltimoPedido < VENTANA_DEDUP_PEDIDO_MS) ||
-          msDesdeUltimoPedido < 90 * 1000); // enfriamiento corto extra, sin importar el contenido
+        registroAnterior.itemsNormalizados === itemsNormalizados &&
+        msDesdeUltimoPedido < VENTANA_DEDUP_PEDIDO_MS;
 
       if (esPedidoDuplicado) {
         console.log(`Pedido duplicado detectado para ${from} (hace ${Math.round(msDesdeUltimoPedido / 1000)}s) — se ignora, no se vuelve a cargar.`);
@@ -1971,7 +1984,7 @@ app.post("/webhook", async (req, res) => {
         } else if (resultadoFudo.ok) {
           // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle que
           // tipee el número de pedido a mano.
-          await sendWhatsappText(telAviso, `✅ Este pedido ya se cargó solo en FUDO (orden #${resultadoFudo.fudoOrderId}):\n\n${pedidoConfirmado}`);
+          await sendWhatsappText(telAviso, `✅ Este pedido ya se cargó solo en FUDO:\n\n${pedidoConfirmado}`);
         } else {
           await sendWhatsappText(telAviso, `${pedidoConfirmado}\n\n¿Me pasás el número de pedido y el link de seguimiento de FUDO para avisarle al cliente? Por ejemplo: "Pedido #5815 - https://..." 🙏`);
           const cola = pendingComandas.get(telAviso) || [];
@@ -1981,7 +1994,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (resultadoFudo.ok) {
-        await sendWhatsappText(from, `¡Tu pedido ya está cargado en el sistema! 📦 Número de orden: #${resultadoFudo.fudoOrderId}`);
+        await sendWhatsappText(from, `¡Tu pedido ya está cargado en el sistema! 📦 Ya lo tenemos en preparación.`);
         const ordenesFudo = loadFudoOrdenes();
         ordenesFudo[resultadoFudo.fudoOrderId] = {
           telefono: from,
