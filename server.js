@@ -1248,6 +1248,11 @@ const pendingComandas = new Map();
 // Evita avisarle al cliente más de una vez si varias personas confirman el mismo pedido.
 const comandasYaAvisadasAlCliente = new Set();
 
+// ---- Evita procesar el mismo pedido confirmado más de una vez (por ejemplo si el
+//      cliente escribe "sí" o "confirmo" varias veces seguidas) — telefono -> {resumen, procesadoEn} ----
+const ultimoPedidoConfirmadoPorCliente = new Map();
+const VENTANA_DEDUP_PEDIDO_MS = 15 * 60 * 1000; // 15 minutos
+
 function soloDigitos(numero) {
   return (numero || "").replace(/[^\d]/g, "");
 }
@@ -1861,6 +1866,20 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (pedidoConfirmado) {
+      // Si es exactamente el mismo pedido que ya procesamos hace poco para este mismo
+      // cliente (por ejemplo, escribió "sí" o "confirmo" varias veces seguidas), no lo
+      // volvemos a cargar ni a avisarle a nadie de nuevo — se ignora silenciosamente.
+      const registroAnterior = ultimoPedidoConfirmadoPorCliente.get(soloDigitos(from));
+      const esPedidoDuplicado =
+        registroAnterior &&
+        registroAnterior.resumen === pedidoConfirmado &&
+        Date.now() - registroAnterior.procesadoEn < VENTANA_DEDUP_PEDIDO_MS;
+
+      if (esPedidoDuplicado) {
+        console.log(`Pedido duplicado detectado para ${from} (ya se había procesado hace ${Math.round((Date.now() - registroAnterior.procesadoEn) / 1000)}s) — se ignora, no se vuelve a cargar.`);
+      } else {
+        ultimoPedidoConfirmadoPorCliente.set(soloDigitos(from), { resumen: pedidoConfirmado, procesadoEn: Date.now() });
+
       const avisosPedido = equipoConPermiso(config, "recibePedidos");
       const idComanda = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 
@@ -1936,6 +1955,7 @@ app.post("/webhook", async (req, res) => {
       } else {
         console.log("Hubo un pedido confirmado pero nadie del equipo tiene marcado \"Recibe pedidos\".");
       }
+      } // cierre del "if (!esPedidoDuplicado)"
     }
 
     // Actualizamos el perfil del cliente: datos nuevos que haya contado (nombre/cumpleaños) y su historial de pedidos.
