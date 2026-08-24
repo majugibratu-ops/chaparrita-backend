@@ -176,6 +176,30 @@ async function construirMenuDesdeFudo() {
     return cat ? cat.name : "Otros";
   };
 
+  // Para poder mostrar el NOMBRE de cada opcional (no solo su id), armamos un diccionario
+  // rápido de id -> producto con todo el catálogo.
+  const productosPorId = {};
+  productos.forEach((p) => {
+    productosPorId[p.id] = p;
+  });
+
+  const textoOpcionales = (producto) => {
+    if (!Array.isArray(producto.productGroups) || producto.productGroups.length === 0) return "";
+    const grupos = producto.productGroups.map((g) => {
+      const opciones = (g.productGroupProducts || [])
+        .map((opt) => {
+          const prodOpt = productosPorId[opt.productId];
+          const nombreOpt = prodOpt ? prodOpt.name : `producto ${opt.productId}`;
+          const extra = opt.price ? ` (+$${opt.price})` : "";
+          return `${nombreOpt}${extra}`;
+        })
+        .join(", ");
+      const cantidad = g.minQuantity === g.maxQuantity ? `elegir ${g.minQuantity}` : `elegir entre ${g.minQuantity} y ${g.maxQuantity}`;
+      return `${cantidad}: ${opciones}`;
+    });
+    return ` [Opcionales — ${grupos.join(" | ")}]`;
+  };
+
   const porCategoria = {};
   productos.forEach((p) => {
     const cat = nombreCategoria(p.productCategoryId);
@@ -187,13 +211,13 @@ async function construirMenuDesdeFudo() {
   Object.keys(porCategoria).forEach((cat) => {
     texto += `\n${cat}\n`;
     porCategoria[cat].forEach((p) => {
-      texto += `- ${p.name}: $${p.price}\n`;
+      texto += `- ${p.name}: $${p.price}${textoOpcionales(p)}\n`;
     });
   });
 
   menuFudoCache = texto.trim();
   menuFudoCacheEn = Date.now();
-  console.log("Menú en vivo de FUDO actualizado y cacheado.");
+  console.log("Menú en vivo de FUDO actualizado y cacheado (con opcionales).");
   return menuFudoCache;
 }
 
@@ -4109,18 +4133,41 @@ async function getFudoProductos() {
 // Llamada aparte a Claude para "traducir" los ítems que pidió el cliente (texto libre) a
 // los productos reales de FUDO con su ID exacto — la API de FUDO necesita el id numérico
 // de cada producto, no el nombre en texto.
-const FUDO_MATCH_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de un pedido de un restaurante mexicano con el catálogo real de productos de su sistema (FUDO). Te paso la lista de ítems que pidió el cliente (en texto libre) y el catálogo completo de productos con sus IDs reales.
+const FUDO_MATCH_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de un pedido de un restaurante mexicano con el catálogo real de productos de su sistema (FUDO). Te paso la lista de ítems que pidió el cliente (en texto libre, puede incluir opcionales elegidos entre paréntesis, por ejemplo "2 Tacos de asada (salsa verde, guacamole)") y el catálogo completo de productos, con sus grupos de opcionales si los tienen.
 
-Tu trabajo es, para cada ítem pedido, encontrar el producto que mejor corresponda en el catálogo (por nombre, aunque no sea idéntico) y devolver su ID real, la cantidad pedida, y el precio del catálogo (nunca inventes precios, usá el que aparece en el catálogo).
+Tu trabajo es, para cada ítem pedido:
+- Encontrar el producto que mejor corresponda en el catálogo (por nombre, aunque no sea idéntico) y devolver su ID real, la cantidad pedida, y el precio del catálogo (nunca inventes precios, usá el que aparece en el catálogo).
+- Si el cliente eligió opcionales para ese ítem (y el producto tiene grupos de opcionales en el catálogo), emparejarlos también con su producto y grupo real, devolviéndolos en "subitems".
 
-Si un ítem pedido NO tiene ningún producto razonable en el catálogo, marcalo como no encontrado (no inventes un ID falso).
+Si un ítem pedido NO tiene ningún producto razonable en el catálogo, marcalo como no encontrado (no inventes un ID falso). Si un opcional mencionado no coincide con ninguna opción real del grupo, simplemente omitilo de "subitems" (no inventes un id falso tampoco).
 
 Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
-{"items": [{"productId": 12, "quantity": 2, "price": 8500, "encontrado": true}, {"encontrado": false, "textoOriginal": "algo que no está en el catálogo"}]}`;
+{"items": [{"productId": 12, "quantity": 2, "price": 8500, "encontrado": true, "subitems": [{"productId": 20, "productGroupId": 3, "quantity": 1, "price": 0}]}, {"encontrado": false, "textoOriginal": "algo que no está en el catálogo"}]}`;
 
 async function matchearItemsConFudo(itemsTexto, productosFudo) {
   try {
-    const catalogoTexto = productosFudo.map((p) => `id:${p.id} - ${p.name} - $${p.price}`).join("\n");
+    const productosPorId = {};
+    productosFudo.forEach((p) => {
+      productosPorId[p.id] = p;
+    });
+    const catalogoTexto = productosFudo
+      .map((p) => {
+        let linea = `id:${p.id} - ${p.name} - $${p.price}`;
+        if (Array.isArray(p.productGroups) && p.productGroups.length > 0) {
+          const grupos = p.productGroups.map((g) => {
+            const opciones = (g.productGroupProducts || [])
+              .map((opt) => {
+                const prodOpt = productosPorId[opt.productId];
+                return `id:${opt.productId} ${prodOpt ? prodOpt.name : "?"} ($${opt.price || 0})`;
+              })
+              .join(", ");
+            return `grupo id:${g.id} (elegir ${g.minQuantity}-${g.maxQuantity}): ${opciones}`;
+          });
+          linea += ` [${grupos.join(" | ")}]`;
+        }
+        return linea;
+      })
+      .join("\n");
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -4130,7 +4177,7 @@ async function matchearItemsConFudo(itemsTexto, productosFudo) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 1200,
+        max_tokens: 1500,
         system: FUDO_MATCH_SYSTEM_PROMPT,
         messages: [{ role: "user", content: `Ítems pedidos:\n${itemsTexto}\n\nCatálogo de FUDO:\n${catalogoTexto}` }],
       }),
@@ -4178,7 +4225,14 @@ async function crearPedidoEnFudo({ itemsTexto, nombreCliente, telefonoCliente, t
     order: {
       comment: `Pedido vía WhatsApp (Chaparrita IA) — Cliente: ${nombreCliente || "sin nombre"}`,
       customer: { name: nombreCliente || "Cliente WhatsApp", phone: telefonoCliente || "" },
-      items: itemsEncontrados.map((i) => ({ quantity: i.quantity || 1, price: i.price || 0, product: { id: i.productId } })),
+      items: itemsEncontrados.map((i) => ({
+        quantity: i.quantity || 1,
+        price: i.price || 0,
+        product: { id: i.productId },
+        ...(Array.isArray(i.subitems) && i.subitems.length > 0
+          ? { subitems: i.subitems.map((s) => ({ productId: s.productId, productGroupId: s.productGroupId, quantity: s.quantity || 1, price: s.price || 0 })) }
+          : {}),
+      })),
       type: tipo === "delivery" ? "delivery" : "pickup",
       people: 1,
     },
