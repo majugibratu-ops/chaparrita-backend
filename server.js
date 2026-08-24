@@ -126,6 +126,20 @@ function equipoPorAreaCompras(config, area) {
 }
 
 // ---- Menú del local (se puede reemplazar subiendo un PDF nuevo desde /admin) ----
+// ---- Mapeo de pedidos de FUDO -> cliente (para poder avisarle por WhatsApp cuando
+//      cambia el estado del pedido, vía webhook) ----
+const FUDO_ORDENES_PATH = path.join(DATA_DIR, "fudoOrdenes.json");
+function loadFudoOrdenes() {
+  try {
+    return JSON.parse(fs.readFileSync(FUDO_ORDENES_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function saveFudoOrdenes(datos) {
+  fs.writeFileSync(FUDO_ORDENES_PATH, JSON.stringify(datos, null, 2), "utf8");
+}
+
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
 function loadMenuText() {
   try {
@@ -1908,6 +1922,13 @@ app.post("/webhook", async (req, res) => {
 
       if (resultadoFudo.ok) {
         await sendWhatsappText(from, `¡Tu pedido ya está cargado en el sistema! 📦 Número de orden: #${resultadoFudo.fudoOrderId}`);
+        const ordenesFudo = loadFudoOrdenes();
+        ordenesFudo[resultadoFudo.fudoOrderId] = {
+          telefono: from,
+          nombre: (perfilCliente && perfilCliente.nombre) || "",
+          creadoEn: new Date().toISOString(),
+        };
+        saveFudoOrdenes(ordenesFudo);
       }
 
       if (avisosPedido.length > 0) {
@@ -4181,9 +4202,42 @@ app.post("/webhook/fudo", async (req, res) => {
     }
 
     const evento = req.body || {};
-    console.log("Webhook de FUDO recibido:", JSON.stringify(evento).slice(0, 300));
-    // TODO: cuando tengamos el mapeo de "id de pedido de FUDO" -> "teléfono del cliente"
-    // guardado, acá se le puede avisar al cliente por WhatsApp el cambio de estado.
+    // Log completo (no recortado) — la primera vez que llegue un webhook real, esto nos
+    // va a confirmar los nombres exactos de los campos que usa FUDO en cada evento.
+    console.log("Webhook de FUDO recibido:", JSON.stringify(evento));
+
+    // Buscamos el tipo de evento y el id del pedido en los lugares más probables del
+    // payload — como todavía no vimos un ejemplo real, cubrimos varias posibilidades.
+    const tipoEvento = evento.event || evento.type || evento.eventType || "";
+    const fudoOrderId = (evento.order && evento.order.id) || evento.orderId || evento.id;
+
+    const MENSAJES_POR_EVENTO = {
+      "ORDER-CONFIRMED": "¡Tu pedido fue confirmado por el local! 🎉 Ya lo estamos preparando.",
+      "ORDER-REJECTED": "Uy, tu pedido fue rechazado por el local. Ya nos estamos comunicando para resolverlo, disculpá las molestias 🙏",
+      "ORDER-READY-TO-DELIVER": "¡Tu pedido ya está listo! 📦 En breve sale para la entrega.",
+      "ORDER-DELIVERY-SENT": "¡Tu pedido ya salió en camino! 🛵",
+      "ORDER-CLOSED": "¡Tu pedido fue entregado, que lo disfrutes! 🌮🎉",
+    };
+
+    if (fudoOrderId) {
+      const ordenesFudo = loadFudoOrdenes();
+      const orden = ordenesFudo[fudoOrderId];
+      if (orden && orden.telefono) {
+        const mensaje = MENSAJES_POR_EVENTO[tipoEvento];
+        if (mensaje) {
+          await sendWhatsappText(orden.telefono, mensaje);
+          agregarMensajeInbox(orden.telefono, "chaparrita", mensaje);
+          console.log(`Aviso de estado del pedido FUDO #${fudoOrderId} (${tipoEvento}) enviado a ${orden.telefono}.`);
+        } else {
+          console.log(`Evento de FUDO no reconocido ("${tipoEvento}") para el pedido #${fudoOrderId} — revisar el nombre exacto del campo de evento en el log de arriba.`);
+        }
+      } else {
+        console.log(`Webhook de FUDO para el pedido #${fudoOrderId} (evento: ${tipoEvento}), pero no tenemos guardado el teléfono de ese cliente.`);
+      }
+    } else {
+      console.log("Webhook de FUDO sin id de pedido reconocible — revisar el nombre exacto del campo en el log de arriba.");
+    }
+
     res.status(200).json({ ok: true });
   } catch (err) {
     console.error("Error procesando webhook de FUDO:", err);
