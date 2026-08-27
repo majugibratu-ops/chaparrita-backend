@@ -1438,18 +1438,22 @@ function requireAdminApi(req, res, next) {
 }
 
 app.get("/admin/login", (_req, res) => {
+  const marcaLogin = loadConfig().panelMarca || {};
+  const logoLoginHtml = marcaLogin.logoBase64
+    ? `<img src="${marcaLogin.logoBase64}" style="width:100%;height:100%;object-fit:cover;" alt="Logo">`
+    : "🌮";
   res.type("html").send([
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Ingresar</title>',
     `<style>${ADMIN_BASE_CSS}
       .login-shell { max-width: 380px; margin: 100px auto; text-align: center; padding: 0 20px; }
-      .login-icono { width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 18px; background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); display: flex; align-items: center; justify-content: center; font-size: 30px; box-shadow: var(--sombra); }
+      .login-icono { width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 18px; overflow: hidden; background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); display: flex; align-items: center; justify-content: center; font-size: 30px; box-shadow: var(--sombra); }
       .login-shell input[type=password] { text-align: center; font-size: 16px; padding: 13px; }
       .login-shell button { width: 100%; padding: 13px; font-size: 14.5px; }
     </style>`,
     '</head><body>',
     '<div class="login-shell">',
-    '<div class="login-icono">🌮</div>',
+    `<div class="login-icono">${logoLoginHtml}</div>`,
     '<h1>Panel de Chaparrita</h1>',
     '<p class="sub">Ingresá la contraseña de administrador una vez, y no te la vuelve a pedir por unas horas.</p>',
     '<input type="password" id="password" placeholder="Contraseña" autofocus />',
