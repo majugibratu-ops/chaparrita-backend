@@ -140,6 +140,21 @@ function saveFudoOrdenes(datos) {
   fs.writeFileSync(FUDO_ORDENES_PATH, JSON.stringify(datos, null, 2), "utf8");
 }
 
+// ---- Facturas de proveedores leídas (foto -> datos extraídos). Por ahora se guardan acá
+// mientras no tenemos la API de stock/gastos de FUDO — el día que la consigamos, el paso
+// final (cargarFacturaEnFudo) se reemplaza por el llamado real, sin tocar el resto del flujo. ----
+const FACTURAS_PATH = path.join(DATA_DIR, "facturasProveedores.json");
+function loadFacturas() {
+  try {
+    return JSON.parse(fs.readFileSync(FACTURAS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveFacturas(lista) {
+  fs.writeFileSync(FACTURAS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
 function loadMenuText() {
   try {
@@ -1080,6 +1095,7 @@ const ADMIN_CONFIG_PAGE = [
   '        checkboxConLabel(persona, "recibePedidos", "\ud83c\udf7d\ufe0f Recibe pedidos confirmados (cocina)"),',
   '        checkboxConLabel(persona, "confirmaComprobantes", "\ud83d\udcb3 Confirma comprobantes de pago"),',
   '        checkboxConLabel(persona, "esCadeteDelivery", "\ud83d\udef5 Es cadete de delivery (se le consulta el env\u00edo)"),',
+  '        checkboxConLabel(persona, "cargaFacturas", "\ud83e\uddfe Puede cargar facturas de proveedores (foto \u2192 stock y gastos en FUDO)"),',
   '        field("\u00c1rea de compras diaria", selectArea),',
   '        btnDel',
   '      ]);',
@@ -1089,7 +1105,7 @@ const ADMIN_CONFIG_PAGE = [
   '  pintarEquipo();',
   '  area.appendChild(equipoBox);',
   '  var btnAddPersona = el("button", {type:"button", text:"+ Agregar persona", class:"btn-secondary"});',
-  '  btnAddPersona.addEventListener("click", function(){ equipoList.push({id: Date.now() + "-" + Math.random().toString(36).slice(2,8), nombre:"Nueva persona", telefono:"", activo:true, esDueño:false, recibeReservas:false, recibePedidos:false, confirmaComprobantes:false, esCadeteDelivery:false, areaCompras:""}); pintarEquipo(); });',
+  '  btnAddPersona.addEventListener("click", function(){ equipoList.push({id: Date.now() + "-" + Math.random().toString(36).slice(2,8), nombre:"Nueva persona", telefono:"", activo:true, esDueño:false, recibeReservas:false, recibePedidos:false, confirmaComprobantes:false, esCadeteDelivery:false, cargaFacturas:false, areaCompras:""}); pintarEquipo(); });',
   '  area.appendChild(btnAddPersona);',
   '',
   '  var grupoInput = textInput(cfg.grupoReservasWhatsappId);',
@@ -1275,6 +1291,11 @@ const comandasYaAvisadasAlCliente = new Set();
 // ---- Evita procesar el mismo pedido confirmado más de una vez (por ejemplo si el
 //      cliente escribe "sí" o "confirmo" varias veces seguidas) — telefono -> {resumen, procesadoEn} ----
 const ultimoPedidoConfirmadoPorCliente = new Map();
+
+// ---- Igual que con los pedidos: evita mandar el aviso de "reserva confirmada" al staff
+//      más de una vez para la misma reserva (identificada por teléfono + fecha + hora) ----
+const ultimaReservaAvisadaPorCliente = new Map();
+const VENTANA_DEDUP_RESERVA_MS = 15 * 60 * 1000; // 15 minutos
 const VENTANA_DEDUP_PEDIDO_MS = 15 * 60 * 1000; // 15 minutos
 
 // Saca espacios de más, tildes/mayúsculas y signos, para comparar solo el contenido real
@@ -1507,6 +1528,62 @@ app.post("/webhook", async (req, res) => {
       }
       // Si no hay ningún comprobante pendiente, dejamos que el mensaje siga el flujo
       // normal (por si el staff quiere probar el bot o hablar como cualquier cliente).
+    }
+
+    // ¿Este mensaje viene de alguien con permiso para cargar facturas (dueño/cajera), y
+    // es una respuesta corta a una factura que ya le mostramos para confirmar? Si dice
+    // que sí, la "cargamos" (por ahora, localmente — ver cargarFacturaEnFudo). Si no,
+    // le pedimos que aclare qué corregir y volvemos a intentar con lo que nos diga.
+    const facturaPendiente = pendingFacturas.get(soloDigitos(from));
+    if (facturaPendiente && message.type === "text") {
+      const textoRespuestaFactura = message.text.body.trim();
+      const pareceAfirmativo = /^(s[ií]|dale|ok|confirmo|correcto|listo)\b/i.test(textoRespuestaFactura);
+      if (pareceAfirmativo) {
+        pendingFacturas.delete(soloDigitos(from));
+        const resultadoCarga = await cargarFacturaEnFudo(facturaPendiente.datos);
+        const facturas = loadFacturas();
+        facturas.push({
+          id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          datos: facturaPendiente.datos,
+          cargadoPor: from,
+          cargadaEnFudo: resultadoCarga.ok,
+          creadaEn: new Date().toISOString(),
+        });
+        saveFacturas(facturas);
+        agregarMensajeInbox(from, "cliente", textoRespuestaFactura);
+        const avisoFinal = resultadoCarga.ok
+          ? "¡Listo, la cargué en FUDO! 🧾✅"
+          : "¡Anotado! Por ahora la guardé en nuestro registro (todavía no tengo acceso para cargarla sola en FUDO), así que hace falta cargarla a mano una última vez 🙏";
+        await sendWhatsappText(from, avisoFinal);
+        console.log(`Factura confirmada y ${resultadoCarga.ok ? "cargada en FUDO" : "guardada localmente (sin API todavía)"} — enviada por ${from}.`);
+      } else {
+        pendingFacturas.delete(soloDigitos(from));
+        agregarMensajeInbox(from, "cliente", textoRespuestaFactura);
+        await sendWhatsappText(from, "Dale, mandame la foto de nuevo (o una más clara) así la vuelvo a leer 🙏");
+        console.log(`Factura rechazada/corrección pedida por ${from}: "${textoRespuestaFactura}"`);
+      }
+      return;
+    }
+
+    // ¿Y este mensaje es una foto o PDF de alguien con permiso para cargar facturas? La
+    // leemos con IA y le mostramos el resumen para que confirme antes de cargar nada.
+    const personaFactura = equipoPorTelefono(config, from);
+    if (personaFactura && personaFactura.cargaFacturas && (message.type === "image" || message.type === "document")) {
+      const mediaId = message.type === "image" ? message.image?.id : message.document?.id;
+      if (mediaId) {
+        await sendWhatsappText(from, "Dale, dejame leer la factura... 🧾⏳");
+        const { base64, mimeType } = await downloadWhatsappMedia(mediaId);
+        const datosFactura = await leerFacturaConClaude(base64, mimeType);
+        if (datosFactura && Array.isArray(datosFactura.items) && datosFactura.items.length > 0) {
+          const resumenFactura = construirResumenFactura(datosFactura);
+          await sendWhatsappText(from, resumenFactura);
+          agregarMensajeInbox(from, "chaparrita", resumenFactura);
+          pendingFacturas.set(soloDigitos(from), { datos: datosFactura, creadaEn: Date.now() });
+        } else {
+          await sendWhatsappText(from, "No pude leer bien esa factura 😕 ¿Podés mandarla de nuevo, más clara o mejor iluminada?");
+        }
+        return;
+      }
     }
 
     // ¿Este mensaje viene de alguien que tiene un pedido pendiente de confirmar? Si es así,
@@ -1882,18 +1959,37 @@ app.post("/webhook", async (req, res) => {
     // Aviso individual al staff (alternativa que sí funciona con Cloud API, que no
     // soporta mandar mensajes a grupos de WhatsApp reales).
     if (reservaConfirmada) {
-      const avisosActivos = equipoConPermiso(config, "recibeReservas");
-      const idComandaReserva = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
-      const mensajeConSolicitud = `${reservaConfirmada}\n\n¿Me confirmás que ya quedó agendada? Contestame "sí" cuando esté 🙏`;
-      for (const aviso of avisosActivos) {
-        const telAviso = soloDigitos(aviso.telefono);
-        await sendWhatsappText(telAviso, mensajeConSolicitud);
-        const cola = pendingComandas.get(telAviso) || [];
-        cola.push({ id: idComandaReserva, tipo: "reserva", resumen: reservaConfirmada, clientePhone: from, creadaEn: Date.now() });
-        pendingComandas.set(telAviso, cola);
-      }
-      if (avisosActivos.length > 0) {
-        console.log(`Aviso de reserva confirmada enviado a ${avisosActivos.length} persona(s) del equipo, pidiendo confirmación de agenda.`);
+      // Identificamos la reserva por teléfono + fecha + hora (no por el texto completo,
+      // que puede variar levemente entre una respuesta de Claude y otra) — si ya avisamos
+      // de esta misma reserva hace poco, no lo repetimos (por ejemplo si el cliente
+      // confirma varias veces seguidas).
+      const fechaHoraReserva = datosReserva ? `${datosReserva.fecha}|${datosReserva.hora}` : null;
+      const registroReservaAnterior = ultimaReservaAvisadaPorCliente.get(soloDigitos(from));
+      const esReservaYaAvisada =
+        fechaHoraReserva &&
+        registroReservaAnterior &&
+        registroReservaAnterior.fechaHora === fechaHoraReserva &&
+        Date.now() - registroReservaAnterior.avisadoEn < VENTANA_DEDUP_RESERVA_MS;
+
+      if (esReservaYaAvisada) {
+        console.log(`Aviso de reserva ya enviado antes para ${from} (${fechaHoraReserva}) — se ignora, no se repite.`);
+      } else {
+        if (fechaHoraReserva) {
+          ultimaReservaAvisadaPorCliente.set(soloDigitos(from), { fechaHora: fechaHoraReserva, avisadoEn: Date.now() });
+        }
+        const avisosActivos = equipoConPermiso(config, "recibeReservas");
+        const idComandaReserva = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+        const mensajeConSolicitud = `${reservaConfirmada}\n\n¿Me confirmás que ya quedó agendada? Contestame "sí" cuando esté 🙏`;
+        for (const aviso of avisosActivos) {
+          const telAviso = soloDigitos(aviso.telefono);
+          await sendWhatsappText(telAviso, mensajeConSolicitud);
+          const cola = pendingComandas.get(telAviso) || [];
+          cola.push({ id: idComandaReserva, tipo: "reserva", resumen: reservaConfirmada, clientePhone: from, creadaEn: Date.now() });
+          pendingComandas.set(telAviso, cola);
+        }
+        if (avisosActivos.length > 0) {
+          console.log(`Aviso de reserva confirmada enviado a ${avisosActivos.length} persona(s) del equipo, pidiendo confirmación de agenda.`);
+        }
       }
     }
 
@@ -2515,6 +2611,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
           <a class="tile" href="/admin/inbox"><div class="tile-icono">💬</div><div class="tile-texto"><b>Atender manualmente</b><div class="tile-desc">Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</div></div></a>
           <a class="tile" href="/admin/reservas"><div class="tile-icono">📅</div><div class="tile-texto"><b>Reservas</b><div class="tile-desc">Vé las reservas del día, editalas o reenviá la confirmación por WhatsApp.</div></div></a>
           <a class="tile" href="/admin/compras"><div class="tile-icono">🛒</div><div class="tile-texto"><b>Lista de compras</b><div class="tile-desc">Vé el historial por día, tildá lo que ya compraste, agregá o editá ítems.</div></div></a>
+          <a class="tile" href="/admin/facturas"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Facturas de proveedores</b><div class="tile-desc">Facturas leídas por foto — pendientes de cargar a mano en FUDO hasta tener la API de stock/gastos.</div></div></a>
           <a class="tile" href="/admin/clientes"><div class="tile-icono">👥</div><div class="tile-texto"><b>Clientes conocidos</b><div class="tile-desc">Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</div></div></a>
           <a class="tile" href="/admin/postulantes"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Postulantes / CVs</b><div class="tile-desc">Gente que dejó su CV, con puntaje automático según experiencia, formación y disponibilidad.</div></div></a>
           <a class="tile" href="/admin/listaespera"><div class="tile-icono">⏳</div><div class="tile-texto"><b>Lista de espera de mesas</b><div class="tile-desc">Clientes esperando lugar cuando el sector está lleno — se les avisa solo por WhatsApp.</div></div></a>
@@ -3335,6 +3432,52 @@ app.post("/admin/compras-agregar", requireAdminApi, (req, res) => {
   }
 });
 
+// ==================== Panel de facturas de proveedores (mientras no hay API de FUDO) ====================
+app.get("/admin/facturas", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<title>Chaparrita - Facturas de proveedores</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .factura-item { font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid var(--borde); }
+      .factura-item:last-child { border-bottom: none; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>🧾 Facturas de proveedores</h1>',
+    '<p class="sub">Facturas leídas por foto y confirmadas. Por ahora se guardan acá — todavía no tenemos la API de FUDO para cargarlas solas, así que hay que pasarlas a mano.</p>',
+    '<div id="msg">Cargando...</div>',
+    '<div id="lista"></div>',
+    '<script>',
+    'fetch("/admin/facturas-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '  .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '  .then(function(data){',
+    '    var cont = document.getElementById("lista");',
+    '    document.getElementById("msg").textContent = data.length + " factura(s) guardada(s).";',
+    '    if (data.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🧾</div>No hay facturas cargadas todavía.</div>"; return; }',
+    '    data.slice().reverse().forEach(function(f) {',
+    '      var div = document.createElement("div");',
+    '      div.className = "card";',
+    '      var badge = f.cargadaEnFudo ? "<span class=\\"badge badge-alto\\">Cargada en FUDO</span>" : "<span class=\\"badge badge-pendiente\\">Pendiente de cargar a mano</span>";',
+    '      var itemsHtml = (f.datos.items || []).map(function(it){ return "<div class=\\"factura-item\\">" + (it.cantidad||"?") + " " + it.producto + " — $" + (it.costoUnitario||"?") + "</div>"; }).join("");',
+    '      div.innerHTML = "<b>" + (f.datos.proveedor || "(proveedor sin identificar)") + "</b> " + badge +',
+    '        "<div class=\\"cliente-detalle\\">" + (f.datos.fecha || "") + " · Total: $" + (f.datos.total || "?") + "</div>" +',
+    '        itemsHtml;',
+    '      cont.appendChild(div);',
+    '    });',
+    '  })',
+    '  .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; } });',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/facturas-data", requireAdminApi, (_req, res) => {
+  res.json(loadFacturas());
+});
+
 
 app.get("/admin/inbox", requireAdminPage, (_req, res) => {
   const html = [
@@ -4142,6 +4285,81 @@ async function getFudoProductos() {
 // Llamada aparte a Claude para "traducir" los ítems que pidió el cliente (texto libre) a
 // los productos reales de FUDO con su ID exacto — la API de FUDO necesita el id numérico
 // de cada producto, no el nombre en texto.
+// ---- Lectura de facturas de proveedores (foto/PDF -> datos estructurados) ----
+const FACTURA_SYSTEM_PROMPT = `Sos un asistente que lee facturas o remitos de proveedores para un restaurante bar mexicano en Formosa, Argentina, a partir de una foto o PDF. Tu trabajo es extraer los datos reales de la factura, sin inventar nada que no se vea con claridad.
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"proveedor": "nombre del proveedor si se ve", "fecha": "DD-MM-YYYY si se ve", "numeroFactura": "si se ve", "items": [{"producto": "nombre tal como aparece", "cantidad": 10, "costoUnitario": 500, "subtotal": 5000}], "total": 5000, "advertencia": "si algo no se entiende bien o falta, contalo acá; si no, dejalo vacío"}`;
+
+async function leerFacturaConClaude(base64, mimeType) {
+  try {
+    const contentBlock = mimeType === "application/pdf"
+      ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
+      : { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } };
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1500,
+        system: FACTURA_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: [contentBlock, { type: "text", text: "Leé esta factura/remito." }] }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al leer factura:", data);
+      return null;
+    }
+    const textoRespuesta = (data.content || [])
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    return JSON.parse(jsonMatch[0]);
+  } catch (err) {
+    console.error("Error leyendo factura con Claude:", err);
+    return null;
+  }
+}
+
+// Arma el texto legible del resumen de la factura, para mostrárselo a quien la mandó y
+// pedirle que confirme antes de cargar nada.
+function construirResumenFactura(datos) {
+  let texto = `🧾 *Factura leída*\n`;
+  if (datos.proveedor) texto += `Proveedor: ${datos.proveedor}\n`;
+  if (datos.fecha) texto += `Fecha: ${datos.fecha}\n`;
+  if (datos.numeroFactura) texto += `N° de factura: ${datos.numeroFactura}\n`;
+  texto += `\nÍtems:\n`;
+  (datos.items || []).forEach((it) => {
+    texto += `• ${it.cantidad || "?"} ${it.producto} — $${it.costoUnitario || "?"} c/u`;
+    if (it.subtotal) texto += ` = $${it.subtotal}`;
+    texto += `\n`;
+  });
+  if (datos.total) texto += `\n*Total: $${datos.total}*\n`;
+  if (datos.advertencia) texto += `\n⚠️ ${datos.advertencia}\n`;
+  texto += `\n¿Está bien así? Contestame "sí" para cargarlo, o contame qué corregir.`;
+  return texto;
+}
+
+// Placeholder — todavía no tenemos acceso a la API de stock/gastos de FUDO (pedida por
+// mail). Por ahora, al confirmar, la factura se guarda localmente en facturasProveedores.json
+// y queda lista para cargar a mano. El día que tengamos la API real, este es el ÚNICO lugar
+// que hay que tocar para que se cargue solo, sin cambiar nada más del flujo de arriba.
+async function cargarFacturaEnFudo(datosFactura) {
+  console.log("TODO: falta la API de stock/gastos de FUDO — la factura queda guardada localmente por ahora, para cargar a mano.");
+  return { ok: false, motivo: "api_no_disponible_todavia" };
+}
+
+// ---- Confirmaciones de factura pendientes: telefono -> {datos, creadaEn} ----
+const pendingFacturas = new Map();
+
 const FUDO_MATCH_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de un pedido de un restaurante mexicano con el catálogo real de productos de su sistema (FUDO). Te paso la lista de ítems que pidió el cliente (en texto libre, puede incluir opcionales elegidos entre paréntesis, por ejemplo "2 Tacos de asada (salsa verde, guacamole)") y el catálogo completo de productos, con sus grupos de opcionales si los tienen.
 
 Tu trabajo es, para cada ítem pedido:
