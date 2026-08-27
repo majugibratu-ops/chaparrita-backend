@@ -761,25 +761,25 @@ function extractClienteDatosMarker(text) {
 // Todas las páginas del panel usan este mismo bloque de estilos como base.
 const ADMIN_BASE_CSS = `
   :root {
-    --coral: #E8674A;
-    --turquesa: #128C7E;
-    --ocre: #E0A324;
-    --jalapeno: #A93B3B;
+    --coral: #FF6B4A;
+    --turquesa: #2DD4C4;
+    --ocre: #F2B705;
+    --jalapeno: #E15A5A;
     --verde-wa: #25D366;
     --verde-wa-oscuro: #075E54;
-    --bg: #F0F2F5;
-    --bg-elevado: #FFFFFF;
-    --card: #FFFFFF;
-    --card-hover: #F5F6F6;
-    --borde: #E9EDEF;
-    --texto: #111B21;
-    --texto-tenue: #667781;
-    --exito: #25D366;
-    --alerta: #E0A324;
-    --peligro: #E8674A;
+    --bg: #12100E;
+    --bg-elevado: #1C1917;
+    --card: #1C1917;
+    --card-hover: #242019;
+    --borde: #34302A;
+    --texto: #F5F0E8;
+    --texto-tenue: #A8A296;
+    --exito: #3FCB8C;
+    --alerta: #F2B705;
+    --peligro: #FF6B4A;
     --radio: 12px;
     --radio-chico: 8px;
-    --sombra: 0 2px 10px -2px rgba(17,27,33,0.12);
+    --sombra: 0 10px 26px -8px rgba(0,0,0,0.6);
   }
   * { box-sizing: border-box; }
   body {
@@ -2646,18 +2646,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
     <html lang="es">
     <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Chaparrita — Panel</title>
       <style>${ADMIN_BASE_CSS}
-        body.chap-dash {
-          --bg: #12100E;
-          --bg-elevado: #1C1917;
-          --card: #1C1917;
-          --card-hover: #232019;
-          --borde: #33302B;
-          --texto: #F5F0E8;
-          --texto-tenue: #A8A296;
-          --sombra: 0 10px 26px -8px rgba(0,0,0,0.6);
-        }
-        body.chap-dash .marca .icono { background: linear-gradient(135deg, #FF6B4A, #F2B705); }
-        body.chap-dash a.logout:hover { color: #FF6B4A; }
+        .marca .icono { background: linear-gradient(135deg, #FF6B4A, #F2B705); }
 
         .chap-hero { margin: 6px 0 36px; }
         .chap-hero h1 {
@@ -2697,7 +2686,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
         .chap-cta { font-size: 12.5px; font-weight: 700; }
       </style>
     </head>
-    <body class="chap-dash">
+    <body>
       <div class="contenedor-ancho">
         <div class="topbar">
           <div class="marca">
