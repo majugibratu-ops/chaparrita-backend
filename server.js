@@ -2001,8 +2001,16 @@ app.post("/webhook", async (req, res) => {
       // Identificamos la reserva por teléfono + fecha + hora (no por el texto completo,
       // que puede variar levemente entre una respuesta de Claude y otra) — si ya avisamos
       // de esta misma reserva hace poco, no lo repetimos (por ejemplo si el cliente
-      // confirma varias veces seguidas).
-      const fechaHoraReserva = datosReserva ? `${datosReserva.fecha}|${datosReserva.hora}` : null;
+      // confirma varias veces seguidas). Preferimos los datos estructurados de
+      // RESERVA_DATOS si vinieron en este mismo turno, pero si Claude no los reenvía (por
+      // ejemplo en una reconfirmación donde solo repite el cierre), sacamos fecha y hora
+      // directo del texto del resumen como respaldo — así el filtro nunca se queda sin
+      // identificador para comparar.
+      const fechaTextoMatch = reservaConfirmada.match(/Fecha:\s*(.+)/);
+      const horaTextoMatch = reservaConfirmada.match(/Horario de llegada:\s*(.+)/);
+      const fechaHoraReserva = datosReserva
+        ? `${datosReserva.fecha}|${datosReserva.hora}`
+        : (fechaTextoMatch && horaTextoMatch ? `${fechaTextoMatch[1].trim()}|${horaTextoMatch[1].trim()}` : null);
       const registroReservaAnterior = ultimaReservaAvisadaPorCliente.get(soloDigitos(from));
       const esReservaYaAvisada =
         fechaHoraReserva &&
