@@ -804,7 +804,7 @@ const ADMIN_BASE_CSS = `
   }
   .marca { display: flex; align-items: center; gap: 10px; }
   .marca .icono {
-    width: 38px; height: 38px; border-radius: 11px;
+    width: 38px; height: 38px; border-radius: 11px; overflow: hidden;
     background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa));
     display: flex; align-items: center; justify-content: center; font-size: 19px;
     box-shadow: var(--sombra);
@@ -916,6 +916,7 @@ const ADMIN_CONFIG_PAGE = [
   '<div class="config-layout">',
   '<nav class="config-sidebar">',
   '<div class="titulo-menu">Ir a la sección</div>',
+  '<a href="#sec-marca">Panel / Marca</a>',
   '<a href="#sec-horarios">Horarios y tienda online</a>',
   '<a href="#sec-amenities">Amenities por sector</a>',
   '<a href="#sec-mesas">Mesas y disponibilidad</a>',
@@ -974,6 +975,41 @@ const ADMIN_CONFIG_PAGE = [
   'function renderForm() {',
   '  var area = document.getElementById("formArea");',
   '  area.innerHTML = "";',
+  '',
+  '  area.appendChild(el("h2", {text:"Panel / Marca", id:"sec-marca"}));',
+  '  area.appendChild(el("p", {text:"El logo y la frase que se ven arriba de todo en el panel principal.", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 12px 0;"}));',
+  '  var marca = cfg.panelMarca || {};',
+  '  var logoPreview = el("div", {style:"width:64px;height:64px;border-radius:16px;overflow:hidden;background:var(--bg-elevado);border:1px solid var(--borde);display:flex;align-items:center;justify-content:center;font-size:30px;margin-bottom:10px;"});',
+  '  if (marca.logoBase64) {',
+  '    var imgPreview = el("img", {});',
+  '    imgPreview.src = marca.logoBase64;',
+  '    imgPreview.style.width = "100%"; imgPreview.style.height = "100%"; imgPreview.style.objectFit = "cover";',
+  '    logoPreview.appendChild(imgPreview);',
+  '  } else {',
+  '    logoPreview.textContent = "🌮";',
+  '  }',
+  '  area.appendChild(logoPreview);',
+  '  var logoFileInput = el("input", {type:"file", accept:"image/*"});',
+  '  var btnSubirLogo = el("button", {type:"button", text:"Subir logo nuevo", class:"btn-secondary"});',
+  '  btnSubirLogo.style.marginLeft = "8px";',
+  '  var logoMsg = el("span", {style:"font-size:12px;margin-left:10px;color:var(--texto-tenue);"});',
+  '  btnSubirLogo.addEventListener("click", function() {',
+  '    if (!logoFileInput.files || !logoFileInput.files[0]) { logoMsg.textContent = "Elegí un archivo primero."; return; }',
+  '    var fd = new FormData();',
+  '    fd.append("logoImagen", logoFileInput.files[0]);',
+  '    logoMsg.textContent = "Subiendo...";',
+  '    fetch("/admin/upload-logo", {method:"POST", body: fd})',
+  '      .then(function(r){ if (!r.ok) { throw new Error("No se pudo subir"); } return r.json(); })',
+  '      .then(function(data){ logoMsg.textContent = "¡Listo!"; cfg.panelMarca = cfg.panelMarca || {}; return fetch("/admin/config-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}); })',
+  '      .then(function(r){ return r.json(); })',
+  '      .then(function(data){ cfg = data; renderForm(); })',
+  '      .catch(function(e){ logoMsg.textContent = "Error: " + e.message; });',
+  '  });',
+  '  area.appendChild(el("div", {}, [logoFileInput, btnSubirLogo, logoMsg]));',
+  '  var tituloHeroInput = textInput(marca.tituloHero || "Todo Chaparrita, en un solo lugar");',
+  '  area.appendChild(field("Título grande del panel", tituloHeroInput));',
+  '  var subtituloHeroInput = taInput(marca.subtituloHero || "Clientes, reservas, pedidos, compras y la configuración del agente — organizado por función, para encontrar todo rápido.");',
+  '  area.appendChild(field("Frase debajo del título", subtituloHeroInput));',
   '',
   '  area.appendChild(el("h2", {text:"Horarios y tienda online", id:"sec-horarios"}));',
   '  var horariosInput = taInput(cfg.horarios);',
@@ -1234,6 +1270,9 @@ const ADMIN_CONFIG_PAGE = [
   '  btnGuardar.style.width = "100%";',
   '  btnGuardar.addEventListener("click", function() {',
   '    var nuevo = JSON.parse(JSON.stringify(cfg));',
+  '    nuevo.panelMarca = nuevo.panelMarca || {};',
+  '    nuevo.panelMarca.tituloHero = tituloHeroInput.value;',
+  '    nuevo.panelMarca.subtituloHero = subtituloHeroInput.value;',
   '    nuevo.horarios = horariosInput.value;',
   '    nuevo.tiendaOnlineUrl = tiendaInput.value;',
   '    nuevo.amenities = {adentro: amAdentro.value, patio: amPatio.value, vereda: amVereda.value};',
@@ -2591,6 +2630,14 @@ app.get("/", (_req, res) => res.send("Chaparrita agente — backend activo ✅")
 
 // ==================== Panel de administración ====================
 app.get("/admin", requireAdminPage, (_req, res) => {
+  const config = loadConfig();
+  const marca = config.panelMarca || {};
+  const tituloHero = marca.tituloHero || "Todo Chaparrita, en un solo lugar";
+  const subtituloHero = marca.subtituloHero || "Clientes, reservas, pedidos, compras y la configuración del agente — organizado por función, para encontrar todo rápido.";
+  const logoHtml = marca.logoBase64
+    ? `<img src="${marca.logoBase64}" style="width:100%;height:100%;object-fit:cover;" alt="Logo">`
+    : "🌮";
+
   const CATS = [
     {
       nombre: "Clientes", emoji: "👥", acento: "#2DD4C4",
@@ -2690,15 +2737,15 @@ app.get("/admin", requireAdminPage, (_req, res) => {
       <div class="contenedor-ancho">
         <div class="topbar">
           <div class="marca">
-            <div class="icono">🌮</div>
+            <div class="icono">${logoHtml}</div>
             <div><b>Chaparrita</b><span>Panel de administración</span></div>
           </div>
           <a class="logout" href="/admin/logout">Cerrar sesión ⏻</a>
         </div>
 
         <div class="chap-hero">
-          <h1>Todo Chaparrita, en un solo lugar</h1>
-          <p>Clientes, reservas, pedidos, compras y la configuración del agente — organizado por función, para encontrar todo rápido.</p>
+          <h1>${tituloHero}</h1>
+          <p>${subtituloHero}</p>
         </div>
 
         ${seccionesHtml}
@@ -2766,6 +2813,27 @@ app.post("/admin/upload-menu", requireAdminApi, upload.single("menuPdf"), async 
   } catch (err) {
     console.error("Error al procesar el PDF del menú:", err);
     res.status(500).send("Hubo un error al procesar el PDF. Probá de nuevo.");
+  }
+});
+
+app.post("/admin/upload-logo", requireAdminApi, upload.single("logoImagen"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No se recibió ninguna imagen." });
+    }
+    if (!req.file.mimetype.startsWith("image/")) {
+      return res.status(400).json({ error: "El archivo tiene que ser una imagen (PNG, JPG, etc.)." });
+    }
+    const base64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+    const config = loadConfig();
+    config.panelMarca = config.panelMarca || {};
+    config.panelMarca.logoBase64 = base64;
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+    console.log(`Logo del panel actualizado desde /admin/config (${Math.round(req.file.buffer.length / 1024)} KB).`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error al subir el logo:", err);
+    res.status(500).json({ error: "No se pudo guardar la imagen." });
   }
 });
 
