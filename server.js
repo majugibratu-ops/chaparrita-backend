@@ -3607,10 +3607,10 @@ app.get("/admin/inbox", requireAdminPage, (_req, res) => {
       .wa-fila.entrante { justify-content: flex-start; }
       .wa-fila.saliente { justify-content: flex-end; }
       .wa-burbuja { max-width: 62%; padding: 7px 10px 6px; border-radius: 9px; font-size: 13.8px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; box-shadow: 0 1px 1.5px rgba(17,27,33,0.13); position: relative; }
-      .wa-fila.entrante .wa-burbuja { background: #FFFFFF; color: var(--texto); border-top-left-radius: 2px; }
+      .wa-fila.entrante .wa-burbuja { background: #FFFFFF; color: #111B21; border-top-left-radius: 2px; }
       .wa-fila.saliente .wa-burbuja { background: #D9FDD3; color: #111B21; border-top-right-radius: 2px; }
       .wa-meta { display: flex; align-items: center; gap: 4px; justify-content: flex-end; margin-top: 3px; font-size: 10.5px; color: rgba(17,27,33,0.45); }
-      .wa-fila.entrante .wa-meta { color: var(--texto-tenue); }
+      .wa-fila.entrante .wa-meta { color: #667781; }
       .wa-check { color: #53BDEB; font-size: 12px; }
       .wa-autor { font-size: 10px; opacity: 0.7; }
 
