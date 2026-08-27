@@ -847,6 +847,38 @@ const ADMIN_BASE_CSS = `
   a.tile b { display: block; color: var(--texto); font-size: 14.5px; margin-bottom: 3px; }
   a.tile .tile-desc { font-size: 12.5px; color: var(--texto-tenue); line-height: 1.4; }
 
+  /* ---- Panel principal: botones cuadrados agrupados por categoría ---- */
+  .categoria-titulo {
+    font-size: 12.5px; color: var(--coral); text-transform: uppercase; letter-spacing: 0.7px;
+    font-weight: 700; margin: 30px 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .categoria-titulo:first-of-type { margin-top: 6px; }
+  .categoria-titulo::after { content: ""; flex: 1; height: 1px; background: var(--borde); }
+  .tile-grid-cuadrado { display: grid; grid-template-columns: repeat(auto-fill, minmax(126px, 1fr)); gap: 12px; }
+  a.tile-cuadrado {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    aspect-ratio: 1 / 1; padding: 14px 8px; border-radius: 18px;
+    background: var(--card); border: 1px solid var(--borde);
+    text-decoration: none; color: var(--texto); text-align: center;
+    transition: all .18s ease; position: relative; overflow: hidden;
+  }
+  a.tile-cuadrado::before {
+    content: ""; position: absolute; inset: 0; opacity: 0; transition: opacity .18s ease;
+    background: linear-gradient(135deg, rgba(232,103,74,0.10), rgba(47,156,149,0.10));
+  }
+  a.tile-cuadrado:hover { border-color: var(--turquesa); transform: translateY(-2px); box-shadow: var(--sombra); }
+  a.tile-cuadrado:hover::before { opacity: 1; }
+  a.tile-cuadrado .tc-icono {
+    width: 46px; height: 46px; border-radius: 14px; flex-shrink: 0;
+    background: var(--bg-elevado); display: flex; align-items: center; justify-content: center;
+    font-size: 22px; border: 1px solid var(--borde); z-index: 1;
+  }
+  a.tile-cuadrado .tc-label { font-size: 12px; font-weight: 600; color: var(--texto); z-index: 1; line-height: 1.25; }
+  @media (max-width: 480px) {
+    a.tile-cuadrado { aspect-ratio: 1 / 0.85; padding: 12px 6px; }
+    .tile-grid-cuadrado { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+  }
+
   .card { background: var(--card); border: 1px solid var(--borde); border-radius: var(--radio); padding: 16px; margin-top: 12px; }
   .row { display: flex; gap: 10px; } .row > * { flex: 1; }
 
@@ -2606,18 +2638,32 @@ app.get("/admin", requireAdminPage, (_req, res) => {
           </div>
           <a class="logout" href="/admin/logout">Cerrar sesión ⏻</a>
         </div>
-        <div class="tile-grid">
-          <a class="tile" href="/admin/switch"><div class="tile-icono">🔌</div><div class="tile-texto"><b>Prender / apagar el asistente</b><div class="tile-desc">Pausalo cuando un operador quiera atender en persona.</div></div></a>
-          <a class="tile" href="/admin/inbox"><div class="tile-icono">💬</div><div class="tile-texto"><b>Atender manualmente</b><div class="tile-desc">Vé las conversaciones y respondé vos mismo cuando quieras, sin usar el celular.</div></div></a>
-          <a class="tile" href="/admin/reservas"><div class="tile-icono">📅</div><div class="tile-texto"><b>Reservas</b><div class="tile-desc">Vé las reservas del día, editalas o reenviá la confirmación por WhatsApp.</div></div></a>
-          <a class="tile" href="/admin/compras"><div class="tile-icono">🛒</div><div class="tile-texto"><b>Lista de compras</b><div class="tile-desc">Vé el historial por día, tildá lo que ya compraste, agregá o editá ítems.</div></div></a>
-          <a class="tile" href="/admin/facturas"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Facturas de proveedores</b><div class="tile-desc">Facturas leídas por foto — pendientes de cargar a mano en FUDO hasta tener la API de stock/gastos.</div></div></a>
-          <a class="tile" href="/admin/clientes"><div class="tile-icono">👥</div><div class="tile-texto"><b>Clientes conocidos</b><div class="tile-desc">Nombres, cumpleaños e historial de pedidos que fue guardando el agente.</div></div></a>
-          <a class="tile" href="/admin/postulantes"><div class="tile-icono">🧾</div><div class="tile-texto"><b>Postulantes / CVs</b><div class="tile-desc">Gente que dejó su CV, con puntaje automático según experiencia, formación y disponibilidad.</div></div></a>
-          <a class="tile" href="/admin/listaespera"><div class="tile-icono">⏳</div><div class="tile-texto"><b>Lista de espera de mesas</b><div class="tile-desc">Clientes esperando lugar cuando el sector está lleno — se les avisa solo por WhatsApp.</div></div></a>
-          <a class="tile" href="/admin/inactivos"><div class="tile-icono">📉</div><div class="tile-texto"><b>Clientes inactivos</b><div class="tile-desc">Detecta clientes que dejaron de pedir y te avisa por WhatsApp.</div></div></a>
-          <a class="tile" href="/admin/menu"><div class="tile-icono">📋</div><div class="tile-texto"><b>Actualizar el menú</b><div class="tile-desc">Subir un PDF nuevo con precios y productos.</div></div></a>
-          <a class="tile" href="/admin/config"><div class="tile-icono">⚙️</div><div class="tile-texto"><b>Precios, horarios, promos y teléfonos</b><div class="tile-desc">Editar promos de cumpleaños, seña, horarios, productos agotados, promos por día y teléfonos del equipo.</div></div></a>
+
+        <div class="categoria-titulo">👥 Clientes</div>
+        <div class="tile-grid-cuadrado">
+          <a class="tile-cuadrado" href="/admin/clientes" title="Nombres, cumpleaños e historial de pedidos"><div class="tc-icono">👥</div><div class="tc-label">Clientes conocidos</div></a>
+          <a class="tile-cuadrado" href="/admin/inactivos" title="Clientes que dejaron de pedir"><div class="tc-icono">📉</div><div class="tc-label">Clientes inactivos</div></a>
+        </div>
+
+        <div class="categoria-titulo">🤖 Administración del agente</div>
+        <div class="tile-grid-cuadrado">
+          <a class="tile-cuadrado" href="/admin/switch" title="Pausalo cuando quieras atender en persona"><div class="tc-icono">🔌</div><div class="tc-label">Prender / apagar</div></a>
+          <a class="tile-cuadrado" href="/admin/inbox" title="Vé las conversaciones y respondé vos mismo"><div class="tc-icono">💬</div><div class="tc-label">Atender manualmente</div></a>
+        </div>
+
+        <div class="categoria-titulo">🏪 Administración del negocio</div>
+        <div class="tile-grid-cuadrado">
+          <a class="tile-cuadrado" href="/admin/reservas" title="Reservas del día, editar o reenviar confirmación"><div class="tc-icono">📅</div><div class="tc-label">Reservas</div></a>
+          <a class="tile-cuadrado" href="/admin/listaespera" title="Clientes esperando lugar cuando el sector está lleno"><div class="tc-icono">⏳</div><div class="tc-label">Lista de espera</div></a>
+          <a class="tile-cuadrado" href="/admin/compras" title="Historial por día, tildar y editar ítems"><div class="tc-icono">🛒</div><div class="tc-label">Lista de compras</div></a>
+          <a class="tile-cuadrado" href="/admin/facturas" title="Facturas de proveedores leídas por foto"><div class="tc-icono">🧾</div><div class="tc-label">Facturas</div></a>
+          <a class="tile-cuadrado" href="/admin/postulantes" title="CVs recibidos, con puntaje automático"><div class="tc-icono">📋</div><div class="tc-label">Postulantes / CVs</div></a>
+        </div>
+
+        <div class="categoria-titulo">⚙️ Configuración general</div>
+        <div class="tile-grid-cuadrado">
+          <a class="tile-cuadrado" href="/admin/menu" title="Subir un PDF nuevo con precios y productos"><div class="tc-icono">📄</div><div class="tc-label">Actualizar menú</div></a>
+          <a class="tile-cuadrado" href="/admin/config" title="Precios, horarios, promos, equipo y teléfonos"><div class="tc-icono">⚙️</div><div class="tc-label">Configuración</div></a>
         </div>
       </div>
     </body>
@@ -3652,6 +3698,7 @@ app.get("/admin/inbox", requireAdminPage, (_req, res) => {
     '      var av = document.getElementById("avatarChatActivo");',
     '      av.style.background = colorAvatar(chat.telefono); av.textContent = inicial(chat.nombre, chat.telefono);',
     '      document.getElementById("chkManual").checked = !!chat.modoManual;',
+    '      ultimoConteoMensajes = chat.mensajes.length;',
     '      pintarMensajes(chat.mensajes);',
     '      pintarLista(todosLosChats);',
     '    });',
@@ -3695,6 +3742,30 @@ app.get("/admin/inbox", requireAdminPage, (_req, res) => {
     '    .then(function(){ abrirChat(telefonoActivo); })',
     '    .catch(function(e){ alert("Error al enviar: " + e.message); });',
     '}',
+    '',
+    '// Auto-refresco cada 1.5s: solo redibuja si cambió algo, para no cortar lo que',
+    '// estés escribiendo ni generar parpadeos innecesarios.',
+    'var ultimoConteoMensajes = 0;',
+    'function chequearActualizaciones() {',
+    '  if (document.hidden) return;',
+    '  fetch("/admin/inbox-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) return null; return r.json(); })',
+    '    .then(function(data){',
+    '      if (!data) return;',
+    '      todosLosChats = data.chats;',
+    '      pintarLista(todosLosChats);',
+    '      if (!telefonoActivo) return;',
+    '      var chat = todosLosChats.find(function(c){ return c.telefono === telefonoActivo; });',
+    '      if (!chat) return;',
+    '      document.getElementById("chkManual").checked = !!chat.modoManual;',
+    '      if (chat.mensajes.length !== ultimoConteoMensajes) {',
+    '        ultimoConteoMensajes = chat.mensajes.length;',
+    '        pintarMensajes(chat.mensajes);',
+    '      }',
+    '    })',
+    '    .catch(function(){});',
+    '}',
+    'setInterval(chequearActualizaciones, 1500);',
     '</' + 'script>',
     '</body></html>'
   ].join("\n");
