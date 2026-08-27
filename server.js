@@ -847,38 +847,6 @@ const ADMIN_BASE_CSS = `
   a.tile b { display: block; color: var(--texto); font-size: 14.5px; margin-bottom: 3px; }
   a.tile .tile-desc { font-size: 12.5px; color: var(--texto-tenue); line-height: 1.4; }
 
-  /* ---- Panel principal: botones cuadrados agrupados por categoría ---- */
-  .categoria-titulo {
-    font-size: 12.5px; color: var(--coral); text-transform: uppercase; letter-spacing: 0.7px;
-    font-weight: 700; margin: 30px 0 12px; display: flex; align-items: center; gap: 8px;
-  }
-  .categoria-titulo:first-of-type { margin-top: 6px; }
-  .categoria-titulo::after { content: ""; flex: 1; height: 1px; background: var(--borde); }
-  .tile-grid-cuadrado { display: grid; grid-template-columns: repeat(auto-fill, minmax(126px, 1fr)); gap: 12px; }
-  a.tile-cuadrado {
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
-    aspect-ratio: 1 / 1; padding: 14px 8px; border-radius: 18px;
-    background: var(--card); border: 1px solid var(--borde);
-    text-decoration: none; color: var(--texto); text-align: center;
-    transition: all .18s ease; position: relative; overflow: hidden;
-  }
-  a.tile-cuadrado::before {
-    content: ""; position: absolute; inset: 0; opacity: 0; transition: opacity .18s ease;
-    background: linear-gradient(135deg, rgba(232,103,74,0.10), rgba(47,156,149,0.10));
-  }
-  a.tile-cuadrado:hover { border-color: var(--turquesa); transform: translateY(-2px); box-shadow: var(--sombra); }
-  a.tile-cuadrado:hover::before { opacity: 1; }
-  a.tile-cuadrado .tc-icono {
-    width: 46px; height: 46px; border-radius: 14px; flex-shrink: 0;
-    background: var(--bg-elevado); display: flex; align-items: center; justify-content: center;
-    font-size: 22px; border: 1px solid var(--borde); z-index: 1;
-  }
-  a.tile-cuadrado .tc-label { font-size: 12px; font-weight: 600; color: var(--texto); z-index: 1; line-height: 1.25; }
-  @media (max-width: 480px) {
-    a.tile-cuadrado { aspect-ratio: 1 / 0.85; padding: 12px 6px; }
-    .tile-grid-cuadrado { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
-  }
-
   .card { background: var(--card); border: 1px solid var(--borde); border-radius: var(--radio); padding: 16px; margin-top: 12px; }
   .row { display: flex; gap: 10px; } .row > * { flex: 1; }
 
@@ -928,7 +896,7 @@ const ADMIN_BASE_CSS = `
 
 const ADMIN_CONFIG_PAGE = [
 
-  '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+  '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
   '<title>Chaparrita - Editar configuracion</title>',
   `<style>${ADMIN_BASE_CSS}
     html { scroll-behavior: smooth; }
@@ -1432,7 +1400,7 @@ function requireAdminApi(req, res, next) {
 
 app.get("/admin/login", (_req, res) => {
   res.type("html").send([
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Ingresar</title>',
     `<style>${ADMIN_BASE_CSS}
       .login-shell { max-width: 380px; margin: 100px auto; text-align: center; padding: 0 20px; }
@@ -2623,14 +2591,114 @@ app.get("/", (_req, res) => res.send("Chaparrita agente — backend activo ✅")
 
 // ==================== Panel de administración ====================
 app.get("/admin", requireAdminPage, (_req, res) => {
+  const CATS = [
+    {
+      nombre: "Clientes", emoji: "👥", acento: "#2DD4C4",
+      items: [
+        { href: "/admin/clientes", icono: "👥", titulo: "Clientes conocidos", desc: "Nombres, cumpleaños e historial de pedidos que fue guardando el agente." },
+        { href: "/admin/inactivos", icono: "📉", titulo: "Clientes inactivos", desc: "Detecta clientes que dejaron de pedir y te avisa por WhatsApp." },
+      ],
+    },
+    {
+      nombre: "Administración del agente", emoji: "🤖", acento: "#E84393",
+      items: [
+        { href: "/admin/switch", icono: "🔌", titulo: "Prender / apagar el asistente", desc: "Pausalo cuando un operador quiera atender en persona." },
+        { href: "/admin/inbox", icono: "💬", titulo: "Atender manualmente", desc: "Vé las conversaciones y respondé vos mismo, sin usar el celular." },
+      ],
+    },
+    {
+      nombre: "Administración del negocio", emoji: "🏪", acento: "#FF6B4A",
+      items: [
+        { href: "/admin/reservas", icono: "📅", titulo: "Reservas", desc: "Vé las reservas del día, editalas o reenviá la confirmación." },
+        { href: "/admin/listaespera", icono: "⏳", titulo: "Lista de espera de mesas", desc: "Clientes esperando lugar cuando el sector está lleno." },
+        { href: "/admin/compras", icono: "🛒", titulo: "Lista de compras", desc: "Historial por día — tildá lo que ya compraste, agregá o editá ítems." },
+        { href: "/admin/facturas", icono: "🧾", titulo: "Facturas de proveedores", desc: "Facturas leídas por foto, pendientes de cargar en FUDO." },
+        { href: "/admin/postulantes", icono: "📋", titulo: "Postulantes / CVs", desc: "Gente que dejó su CV, con puntaje automático." },
+      ],
+    },
+    {
+      nombre: "Configuración general", emoji: "⚙️", acento: "#F2B705",
+      items: [
+        { href: "/admin/menu", icono: "📄", titulo: "Actualizar el menú", desc: "Subir un PDF nuevo con precios y productos." },
+        { href: "/admin/config", icono: "⚙️", titulo: "Configuración", desc: "Precios, horarios, promos, equipo y teléfonos." },
+      ],
+    },
+  ];
+
+  const seccionesHtml = CATS.map((cat) => `
+        <div class="chap-seccion">
+          <div class="chap-eyebrow"><span class="dot" style="background:${cat.acento}"></span>${cat.emoji} ${cat.nombre}</div>
+          <div class="chap-grid">
+            ${cat.items.map((it) => `
+            <a class="chap-card" href="${it.href}" style="--acento:${cat.acento}">
+              <div class="chap-card-top">
+                <div class="chap-icono">${it.icono}</div>
+                <b>${it.titulo}</b>
+              </div>
+              <p>${it.desc}</p>
+              <span class="chap-cta" style="color:${cat.acento}">Abrir →</span>
+            </a>`).join("")}
+          </div>
+        </div>`).join("");
+
   res.type("html").send(`
     <!DOCTYPE html>
     <html lang="es">
-    <head><meta charset="UTF-8"><title>Chaparrita — Panel</title>
-      <style>${ADMIN_BASE_CSS}</style>
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Chaparrita — Panel</title>
+      <style>${ADMIN_BASE_CSS}
+        body.chap-dash {
+          --bg: #12100E;
+          --bg-elevado: #1C1917;
+          --card: #1C1917;
+          --card-hover: #232019;
+          --borde: #33302B;
+          --texto: #F5F0E8;
+          --texto-tenue: #A8A296;
+          --sombra: 0 10px 26px -8px rgba(0,0,0,0.6);
+        }
+        body.chap-dash .marca .icono { background: linear-gradient(135deg, #FF6B4A, #F2B705); }
+        body.chap-dash a.logout:hover { color: #FF6B4A; }
+
+        .chap-hero { margin: 6px 0 36px; }
+        .chap-hero h1 {
+          font-size: 30px; font-weight: 800; letter-spacing: -0.6px; margin: 0 0 8px;
+          background: linear-gradient(120deg, #2DD4C4, #F2B705 55%, #FF6B4A);
+          -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .chap-hero p { color: var(--texto-tenue); font-size: 14px; margin: 0; max-width: 520px; line-height: 1.5; }
+
+        .chap-seccion { margin-top: 36px; }
+        .chap-seccion:first-of-type { margin-top: 4px; }
+        .chap-eyebrow {
+          display: flex; align-items: center; gap: 9px; font-size: 11.5px; font-weight: 700;
+          text-transform: uppercase; letter-spacing: 1px; color: var(--texto-tenue); margin-bottom: 14px;
+        }
+        .chap-eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+        .chap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
+        @media (max-width: 560px) {
+          .chap-grid { grid-template-columns: 1fr; }
+        }
+        .chap-card {
+          background: var(--card); border: 1px solid var(--borde); border-radius: 16px;
+          padding: 20px; display: flex; flex-direction: column; gap: 12px;
+          text-decoration: none; color: var(--texto); transition: all .18s ease; position: relative;
+        }
+        .chap-card:hover { transform: translateY(-3px); box-shadow: var(--sombra); border-color: var(--acento); background: var(--card-hover); }
+        .chap-card:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
+        .chap-card-top { display: flex; align-items: center; gap: 12px; }
+        .chap-icono {
+          width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
+          background: var(--bg-elevado); border: 1px solid var(--borde);
+          display: flex; align-items: center; justify-content: center; font-size: 20px;
+        }
+        .chap-card b { font-size: 15px; font-weight: 700; line-height: 1.3; }
+        .chap-card p { font-size: 12.6px; color: var(--texto-tenue); line-height: 1.5; margin: 0; flex: 1; }
+        .chap-cta { font-size: 12.5px; font-weight: 700; }
+      </style>
     </head>
-    <body>
-      <div class="contenedor">
+    <body class="chap-dash">
+      <div class="contenedor-ancho">
         <div class="topbar">
           <div class="marca">
             <div class="icono">🌮</div>
@@ -2639,32 +2707,12 @@ app.get("/admin", requireAdminPage, (_req, res) => {
           <a class="logout" href="/admin/logout">Cerrar sesión ⏻</a>
         </div>
 
-        <div class="categoria-titulo">👥 Clientes</div>
-        <div class="tile-grid-cuadrado">
-          <a class="tile-cuadrado" href="/admin/clientes" title="Nombres, cumpleaños e historial de pedidos"><div class="tc-icono">👥</div><div class="tc-label">Clientes conocidos</div></a>
-          <a class="tile-cuadrado" href="/admin/inactivos" title="Clientes que dejaron de pedir"><div class="tc-icono">📉</div><div class="tc-label">Clientes inactivos</div></a>
+        <div class="chap-hero">
+          <h1>Todo Chaparrita, en un solo lugar</h1>
+          <p>Clientes, reservas, pedidos, compras y la configuración del agente — organizado por función, para encontrar todo rápido.</p>
         </div>
 
-        <div class="categoria-titulo">🤖 Administración del agente</div>
-        <div class="tile-grid-cuadrado">
-          <a class="tile-cuadrado" href="/admin/switch" title="Pausalo cuando quieras atender en persona"><div class="tc-icono">🔌</div><div class="tc-label">Prender / apagar</div></a>
-          <a class="tile-cuadrado" href="/admin/inbox" title="Vé las conversaciones y respondé vos mismo"><div class="tc-icono">💬</div><div class="tc-label">Atender manualmente</div></a>
-        </div>
-
-        <div class="categoria-titulo">🏪 Administración del negocio</div>
-        <div class="tile-grid-cuadrado">
-          <a class="tile-cuadrado" href="/admin/reservas" title="Reservas del día, editar o reenviar confirmación"><div class="tc-icono">📅</div><div class="tc-label">Reservas</div></a>
-          <a class="tile-cuadrado" href="/admin/listaespera" title="Clientes esperando lugar cuando el sector está lleno"><div class="tc-icono">⏳</div><div class="tc-label">Lista de espera</div></a>
-          <a class="tile-cuadrado" href="/admin/compras" title="Historial por día, tildar y editar ítems"><div class="tc-icono">🛒</div><div class="tc-label">Lista de compras</div></a>
-          <a class="tile-cuadrado" href="/admin/facturas" title="Facturas de proveedores leídas por foto"><div class="tc-icono">🧾</div><div class="tc-label">Facturas</div></a>
-          <a class="tile-cuadrado" href="/admin/postulantes" title="CVs recibidos, con puntaje automático"><div class="tc-icono">📋</div><div class="tc-label">Postulantes / CVs</div></a>
-        </div>
-
-        <div class="categoria-titulo">⚙️ Configuración general</div>
-        <div class="tile-grid-cuadrado">
-          <a class="tile-cuadrado" href="/admin/menu" title="Subir un PDF nuevo con precios y productos"><div class="tc-icono">📄</div><div class="tc-label">Actualizar menú</div></a>
-          <a class="tile-cuadrado" href="/admin/config" title="Precios, horarios, promos, equipo y teléfonos"><div class="tc-icono">⚙️</div><div class="tc-label">Configuración</div></a>
-        </div>
+        ${seccionesHtml}
       </div>
     </body>
     </html>
@@ -2675,7 +2723,7 @@ app.get("/admin/menu", requireAdminPage, (_req, res) => {
   res.type("html").send(`
     <!DOCTYPE html>
     <html lang="es">
-    <head><meta charset="UTF-8"><title>Chaparrita — Actualizar menú</title>
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Chaparrita — Actualizar menú</title>
       <style>${ADMIN_BASE_CSS}
         .dropzone { border: 2px dashed var(--borde); border-radius: var(--radio); padding: 30px 16px; text-align: center; margin-top: 14px; transition: border-color .15s ease; }
         .dropzone:hover { border-color: var(--turquesa); }
@@ -2718,7 +2766,7 @@ app.post("/admin/upload-menu", requireAdminApi, upload.single("menuPdf"), async 
     console.log(`Menú actualizado desde /admin (${text.length} caracteres).`);
 
     res.type("html").send(`
-      <!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><style>${ADMIN_BASE_CSS}</style></head>
+      <!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${ADMIN_BASE_CSS}</style></head>
       <body><div class="contenedor" style="text-align:center;padding-top:60px;">
       <div style="font-size:44px;margin-bottom:10px;">✅</div>
       <h1>Menú actualizado</h1>
@@ -2735,7 +2783,7 @@ app.post("/admin/upload-menu", requireAdminApi, upload.single("menuPdf"), async 
 // ==================== Switch rápido para prender/apagar el asistente ====================
 app.get("/admin/clientes", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Clientes</title>',
     `<style>${ADMIN_BASE_CSS}
       .filtros-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
@@ -2879,7 +2927,7 @@ app.post("/admin/clientes-guardar", requireAdminApi, (req, res) => {
 // ==================== Postulantes / CVs ====================
 app.get("/admin/postulantes", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Postulantes</title>',
     `<style>${ADMIN_BASE_CSS}
       .postulante-nombre { font-weight: 700; font-size: 15px; }
@@ -2984,7 +3032,7 @@ app.get("/admin/postulantes/cv/:id", requireAdminPage, (req, res) => {
 // ==================== Lista de espera de mesas ====================
 app.get("/admin/listaespera", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Lista de espera</title>',
     `<style>${ADMIN_BASE_CSS}
       .espera-nombre { font-weight: 700; font-size: 15px; }
@@ -3064,7 +3112,7 @@ app.post("/admin/listaespera-quitar", requireAdminApi, (req, res) => {
 // ==================== Panel de reservas (ver, editar y confirmar manualmente) ====================
 app.get("/admin/reservas", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Reservas</title>',
     `<style>${ADMIN_BASE_CSS}
       .filtro-fecha-row { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
@@ -3251,7 +3299,7 @@ app.post("/admin/reservas-eliminar", requireAdminApi, (req, res) => {
 // ==================== Panel de lista de compras (ver historial, tildar, agregar y editar) ====================
 app.get("/admin/compras", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Lista de compras</title>',
     `<style>${ADMIN_BASE_CSS}
       .filtro-fecha-row { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
@@ -3481,7 +3529,7 @@ app.post("/admin/compras-agregar", requireAdminApi, (req, res) => {
 // ==================== Panel de facturas de proveedores (mientras no hay API de FUDO) ====================
 app.get("/admin/facturas", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Facturas de proveedores</title>',
     `<style>${ADMIN_BASE_CSS}
       .factura-item { font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid var(--borde); }
@@ -3527,7 +3575,7 @@ app.post("/admin/facturas-data", requireAdminApi, (_req, res) => {
 
 app.get("/admin/inbox", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Atender manualmente</title>',
     `<style>${ADMIN_BASE_CSS}
       body { overflow: hidden; }
@@ -3822,7 +3870,7 @@ app.post("/admin/inbox-send", requireAdminApi, async (req, res) => {
 
 app.get("/admin/switch", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Prender o apagar</title>',
     `<style>${ADMIN_BASE_CSS}
       .estado-card { display: flex; align-items: center; justify-content: space-between; padding: 22px 20px; }
@@ -3969,7 +4017,7 @@ function construirMensajeInactivos(inactivos) {
 
 app.get("/admin/inactivos", requireAdminPage, (_req, res) => {
   const html = [
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">',
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Clientes inactivos</title>',
     `<style>${ADMIN_BASE_CSS}
       .inactivo-nombre { font-weight: 700; font-size: 15px; }
