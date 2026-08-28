@@ -1582,25 +1582,50 @@ app.post("/webhook", async (req, res) => {
     const facturaPendiente = pendingFacturas.get(soloDigitos(from));
     if (facturaPendiente && message.type === "text") {
       const textoRespuestaFactura = message.text.body.trim();
-      const pareceAfirmativo = /^(s[ií]|dale|ok|confirmo|correcto|listo)\b/i.test(textoRespuestaFactura);
-      if (pareceAfirmativo) {
+      const interpretacion = interpretarConfirmacionFactura(textoRespuestaFactura);
+      if (interpretacion.confirma && interpretacion.faltaAclararEfectivo) {
+        agregarMensajeInbox(from, "cliente", textoRespuestaFactura);
+        await sendWhatsappText(from, 'Decime "efectivo caja" o "efectivo reserva" para saber si entra al arqueo o no 🙏');
+        console.log(`Factura de ${from}: dijo efectivo sin aclarar caja/reserva, se le pidió que aclare.`);
+        return;
+      }
+      if (interpretacion.confirma && interpretacion.medioPago) {
         pendingFacturas.delete(soloDigitos(from));
-        const resultadoCarga = await cargarFacturaEnFudo(facturaPendiente.datos);
+        const resultadoCarga = await cargarFacturaEnFudo(
+          facturaPendiente.datos,
+          interpretacion.medioPago,
+          interpretacion.useInCashCount
+        );
         const facturas = loadFacturas();
         facturas.push({
           id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
           datos: facturaPendiente.datos,
+          medioPago: interpretacion.medioPago,
+          useInCashCount: interpretacion.useInCashCount,
           cargadoPor: from,
           cargadaEnFudo: resultadoCarga.ok,
           creadaEn: new Date().toISOString(),
         });
         saveFacturas(facturas);
         agregarMensajeInbox(from, "cliente", textoRespuestaFactura);
-        const avisoFinal = resultadoCarga.ok
-          ? "¡Listo, la cargué en FUDO! 🧾✅"
-          : "¡Anotado! Por ahora la guardé en nuestro registro (todavía no tengo acceso para cargarla sola en FUDO), así que hace falta cargarla a mano una última vez 🙏";
+        let avisoFinal;
+        if (resultadoCarga.ok) {
+          avisoFinal = "¡Listo, la cargué en FUDO! 🧾✅";
+          if (resultadoCarga.sinMatchear && resultadoCarga.sinMatchear.length > 0) {
+            avisoFinal += `\n\n⚠️ Estos ítems no los pude emparejar con ningún ingrediente de FUDO, revisalos a mano:\n${resultadoCarga.sinMatchear
+              .map((s) => `• ${s}`)
+              .join("\n")}`;
+          }
+        } else {
+          avisoFinal = `¡Anotado! Por ahora la guardé en nuestro registro, pero no la pude cargar sola en FUDO (${resultadoCarga.motivo}) — hace falta cargarla a mano 🙏`;
+        }
         await sendWhatsappText(from, avisoFinal);
-        console.log(`Factura confirmada y ${resultadoCarga.ok ? "cargada en FUDO" : "guardada localmente (sin API todavía)"} — enviada por ${from}.`);
+        console.log(`Factura confirmada y ${resultadoCarga.ok ? "cargada en FUDO" : "guardada localmente (falló la carga: " + resultadoCarga.motivo + ")"} — enviada por ${from}.`);
+      } else if (interpretacion.confirma) {
+        // Confirmó pero no mencionó ningún medio de pago reconocible.
+        agregarMensajeInbox(from, "cliente", textoRespuestaFactura);
+        await sendWhatsappText(from, 'Contame con qué se pagó: "efectivo caja", "efectivo reserva", "mercadopago" o "cuenta corriente" 🙏');
+        console.log(`Factura de ${from}: confirmó pero sin medio de pago reconocible, se le pidió que aclare.`);
       } else {
         pendingFacturas.delete(soloDigitos(from));
         agregarMensajeInbox(from, "cliente", textoRespuestaFactura);
@@ -4603,6 +4628,101 @@ async function getFudoPaymentMethodId(nombreBuscado) {
   return encontrado.id;
 }
 
+// Los gastos de proveedores en Chaparrita se pagan de tres formas: efectivo, Mercadopago,
+// o quedan a cuenta corriente (fiado, se paga después) — este helper mapea cómo puede venir
+// dicho eso en una factura leída por foto (o escrito por el usuario) al medio de pago real
+// de FUDO, por code (más estable que por nombre exacto).
+const FUDO_ALIAS_MEDIO_PAGO = {
+  efectivo: "cash",
+  cash: "cash",
+  mercadopago: "mercadopago normal",
+  "mercado pago": "mercadopago normal",
+  mp: "mercadopago normal",
+  "cuenta corriente": "house-account",
+  "cta cte": "house-account",
+  "cta. cte.": "house-account",
+  fiado: "house-account",
+  "a cuenta": "house-account",
+};
+
+async function getFudoPaymentMethodIdPorAlias(textoLibre) {
+  const clave = (textoLibre || "").toLowerCase().trim();
+  const code = FUDO_ALIAS_MEDIO_PAGO[clave];
+  const metodos = await getFudoPaymentMethods();
+  const encontrado = code
+    ? metodos.find((m) => (m.code || "").toLowerCase() === code)
+    : metodos.find((m) => (m.nombre || "").toLowerCase().includes(clave));
+  if (!encontrado) throw new Error(`Medio de pago "${textoLibre}" no encontrado en FUDO`);
+  return encontrado.id;
+}
+
+// ---- Crear gasto en FUDO (factura de proveedor) ----
+// Confirmado con gastos reales ya cargados en la cuenta: la caja (cashRegister) es
+// siempre la misma ("Principal", id 1), y expenseCategory / receiptType / commercialDocument
+// casi nunca se usan en la práctica (vienen null en los gastos existentes) — por eso acá son
+// opcionales, se mandan solo si se pasan explícitamente.
+const FUDO_CASH_REGISTER_ID = "1"; // "Principal" — confirmado con gastos reales de la cuenta
+
+// IMPORTANTE — useInCashCount cuando el medio de pago es Efectivo:
+// el efectivo puede salir de la caja física principal de Chaparrita (SÍ entra al arqueo,
+// useInCashCount: true) o de la reserva personal de Tuti (NO entra al arqueo,
+// useInCashCount: false). Por eso NO tiene un valor por defecto acá abajo — hay que decidirlo
+// explícitamente cada vez que se llama a esta función, para no cargar mal un gasto por error.
+async function crearGastoFudo({
+  amount,
+  date,
+  providerId,
+  paymentMethodId,
+  useInCashCount,
+  description = "",
+  receiptNumber = "",
+  paymentDate = null,
+  dueDate = null,
+  expenseCategoryId = null,
+  receiptTypeId = null,
+}) {
+  if (useInCashCount !== true && useInCashCount !== false) {
+    throw new Error(
+      "crearGastoFudo: falta indicar useInCashCount (true/false). Si el pago fue en Efectivo, " +
+        "definir si salió de la caja física principal de Chaparrita (true, entra al arqueo) o de " +
+        "la reserva personal (false, no entra al arqueo)."
+    );
+  }
+  const relationships = {
+    provider: { data: { id: String(providerId), type: "Provider" } },
+    paymentMethod: { data: { id: String(paymentMethodId), type: "PaymentMethod" } },
+    cashRegister: { data: { id: FUDO_CASH_REGISTER_ID, type: "CashRegister" } },
+  };
+  if (expenseCategoryId) {
+    relationships.expenseCategory = { data: { id: String(expenseCategoryId), type: "ExpenseCategory" } };
+  }
+  if (receiptTypeId) {
+    relationships.receiptType = { data: { id: String(receiptTypeId), type: "ReceiptType" } };
+  }
+
+  const body = {
+    data: {
+      type: "Expense",
+      attributes: {
+        amount,
+        date,
+        useInCashCount,
+        receiptNumber,
+        description,
+        paymentDate: paymentDate || date,
+        dueDate: dueDate || date,
+      },
+      relationships,
+    },
+  };
+
+  const data = await fudoApiFetch("/expenses", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data ? data.data : null;
+}
+
 // RUTA TEMPORAL DE PRUEBA — para ver un gasto real de FUDO con cashRegister, receiptType
 // y commercialDocument incluidos, y así terminar de armar "Create expense". Borrar cuando
 // ya no haga falta.
@@ -4761,17 +4881,180 @@ function construirResumenFactura(datos) {
   });
   if (datos.total) texto += `\n*Total: $${datos.total}*\n`;
   if (datos.advertencia) texto += `\n⚠️ ${datos.advertencia}\n`;
-  texto += `\n¿Está bien así? Contestame "sí" para cargarlo, o contame qué corregir.`;
+  texto += `\n¿Está bien así? Contestame con cómo se pagó para cargarla en FUDO:\n`;
+  texto += `• "efectivo caja" (sale de la caja física de Chaparrita)\n`;
+  texto += `• "efectivo reserva" (sale de tu reserva personal)\n`;
+  texto += `• "mercadopago"\n`;
+  texto += `• "cuenta corriente" (queda a fiado con el proveedor)\n`;
+  texto += `\nO contame qué corregir si algo está mal.`;
   return texto;
 }
 
-// Placeholder — todavía no tenemos acceso a la API de stock/gastos de FUDO (pedida por
-// mail). Por ahora, al confirmar, la factura se guarda localmente en facturasProveedores.json
-// y queda lista para cargar a mano. El día que tengamos la API real, este es el ÚNICO lugar
-// que hay que tocar para que se cargue solo, sin cambiar nada más del flujo de arriba.
-async function cargarFacturaEnFudo(datosFactura) {
-  console.log("TODO: falta la API de stock/gastos de FUDO — la factura queda guardada localmente por ahora, para cargar a mano.");
-  return { ok: false, motivo: "api_no_disponible_todavia" };
+// Interpreta la respuesta del staff/dueño a la confirmación de una factura: si confirma,
+// con qué medio de pago, y si ese pago mueve la caja física principal (useInCashCount).
+// Devuelve null si el texto no menciona ningún medio de pago reconocible (en ese caso hay
+// que pedirle que aclare, en vez de asumir algo).
+function interpretarConfirmacionFactura(texto) {
+  const t = (texto || "").toLowerCase();
+  const confirmaAlgo = /\b(s[ií]|dale|ok|confirmo|correcto|listo)\b/.test(t);
+  if (!confirmaAlgo) return { confirma: false };
+
+  if (t.includes("reserva")) {
+    return { confirma: true, medioPago: "efectivo", useInCashCount: false };
+  }
+  if (t.includes("caja")) {
+    return { confirma: true, medioPago: "efectivo", useInCashCount: true };
+  }
+  if (t.includes("mercado") || /\bmp\b/.test(t)) {
+    return { confirma: true, medioPago: "mercadopago", useInCashCount: false };
+  }
+  if (t.includes("cuenta corriente") || t.includes("cta cte") || t.includes("cta. cte") || t.includes("fiado")) {
+    return { confirma: true, medioPago: "cuenta corriente", useInCashCount: false };
+  }
+  if (t.includes("efectivo")) {
+    // Dijo "efectivo" pero no aclaró caja o reserva — no hay que asumir, se le pide que aclare.
+    return { confirma: true, medioPago: null, useInCashCount: null, faltaAclararEfectivo: true };
+  }
+  // Confirmó pero no mencionó ningún medio de pago reconocible.
+  return { confirma: true, medioPago: null, useInCashCount: null };
+}
+
+// Convierte "DD-MM-YYYY" (formato que devuelve leerFacturaConClaude) a "YYYY-MM-DD"
+// (formato que pide la API de FUDO). Si no matchea ese patrón, devuelve la fecha de hoy.
+function fechaFacturaAFormatoFudo(fechaTexto) {
+  const m = (fechaTexto || "").match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (!m) return new Date().toISOString().slice(0, 10);
+  const [, dd, mm, yyyy] = m;
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+// Empareja el nombre de proveedor leído en la factura con el proveedor real en FUDO
+// (comparación simple, insensible a mayúsculas/tildes, por inclusión en cualquier sentido).
+function matchearProveedorFudo(nombreLeido, proveedoresFudo) {
+  if (!nombreLeido) return null;
+  const normalizar = (s) =>
+    (s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim();
+  const buscado = normalizar(nombreLeido);
+  return (
+    proveedoresFudo.find((p) => {
+      const nombre = normalizar(p.nombre);
+      return nombre.includes(buscado) || buscado.includes(nombre);
+    }) || null
+  );
+}
+
+// Empareja los ítems de la factura (texto libre, como los escribió/leyó la IA) con los
+// ingredientes reales de FUDO, usando Claude (mismo enfoque que matchearItemsConFudo para
+// pedidos). Devuelve solo los que se pudieron emparejar con confianza.
+const FUDO_MATCH_INGREDIENTES_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de una factura de un proveedor con el catálogo real de ingredientes de un restaurante (en su sistema FUDO). Te paso la lista de ítems de la factura (nombre tal como aparece impreso, puede tener abreviaturas o mayúsculas raras) y el catálogo real de ingredientes con sus IDs.
+
+Para cada ítem de la factura, encontrá el ingrediente que mejor corresponda por nombre (aunque no sea idéntico, ej. "COCA COLA 1.5L" puede corresponder a "Coca Cola 1,5L"). Si un ítem de la factura no tiene ningún ingrediente razonable en el catálogo, marcalo como no encontrado (no inventes un ID falso).
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"items": [{"ingredientId": "12", "cantidad": 10, "costoUnitario": 500, "encontrado": true}, {"encontrado": false, "textoOriginal": "algo que no está en el catálogo"}]}`;
+
+async function matchearIngredientesFactura(itemsFactura, ingredientesFudo) {
+  try {
+    const catalogoTexto = ingredientesFudo.map((i) => `id:${i.id} - ${i.nombre}`).join("\n");
+    const itemsTexto = itemsFactura
+      .map((it) => `${it.cantidad || "?"} x "${it.producto}" — costo unitario $${it.costoUnitario || "?"}`)
+      .join("\n");
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1500,
+        system: FUDO_MATCH_INGREDIENTES_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: `CATÁLOGO DE INGREDIENTES:\n${catalogoTexto}\n\nÍTEMS DE LA FACTURA:\n${itemsTexto}`,
+          },
+        ],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al matchear ingredientes de factura:", data);
+      return [];
+    }
+    const textoRespuesta = (data.content || [])
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+    const parsed = JSON.parse(jsonMatch[0]);
+    return Array.isArray(parsed.items) ? parsed.items : [];
+  } catch (err) {
+    console.error("Error matcheando ingredientes de factura con Claude:", err);
+    return [];
+  }
+}
+
+// Carga una factura de proveedor ya confirmada en FUDO: matchea el proveedor y los
+// ingredientes con el catálogo real, suma el stock comprado, y crea el gasto con el medio
+// de pago y el flag de arqueo (useInCashCount) que confirmó el staff/dueño al aprobarla.
+async function cargarFacturaEnFudo(datosFactura, medioPagoTexto, useInCashCount) {
+  try {
+    const [proveedoresFudo, ingredientesFudo] = await Promise.all([
+      getFudoProveedores(),
+      getFudoIngredientes(),
+    ]);
+
+    const proveedorMatch = matchearProveedorFudo(datosFactura.proveedor, proveedoresFudo);
+    if (!proveedorMatch) {
+      return { ok: false, motivo: `proveedor_no_encontrado: "${datosFactura.proveedor || "(sin nombre)"}"` };
+    }
+
+    const paymentMethodId = await getFudoPaymentMethodIdPorAlias(medioPagoTexto);
+
+    // Sumamos stock ingrediente por ingrediente (los que no matchean quedan sin tocar,
+    // se avisan en el resultado para revisarlos a mano).
+    const itemsMatch = await matchearIngredientesFactura(datosFactura.items || [], ingredientesFudo);
+    const sinMatchear = [];
+    for (const item of itemsMatch) {
+      if (!item.encontrado) {
+        sinMatchear.push(item.textoOriginal || "(ítem sin identificar)");
+        continue;
+      }
+      try {
+        await sumarStockIngrediente(item.ingredientId, Number(item.cantidad) || 0, item.costoUnitario ?? null);
+      } catch (errStock) {
+        console.error("Error sumando stock de un ingrediente de factura:", errStock);
+        sinMatchear.push(`${item.textoOriginal || item.ingredientId} (error al sumar stock)`);
+      }
+    }
+
+    const gasto = await crearGastoFudo({
+      amount: Number(datosFactura.total) || 0,
+      date: fechaFacturaAFormatoFudo(datosFactura.fecha),
+      providerId: proveedorMatch.id,
+      paymentMethodId,
+      useInCashCount,
+      description: `Factura ${datosFactura.numeroFactura || ""}`.trim(),
+      receiptNumber: datosFactura.numeroFactura || "",
+    });
+
+    if (!gasto) {
+      return { ok: false, motivo: "error_creando_gasto_en_fudo" };
+    }
+
+    return { ok: true, gastoId: gasto.id, sinMatchear };
+  } catch (err) {
+    console.error("Error cargando factura en FUDO:", err);
+    return { ok: false, motivo: "error_inesperado: " + err.message };
+  }
 }
 
 // ---- Confirmaciones de factura pendientes: telefono -> {datos, creadaEn} ----
