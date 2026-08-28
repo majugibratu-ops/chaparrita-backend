@@ -1361,7 +1361,18 @@ function normalizarItemsParaComparar(itemsTexto) {
 }
 
 function soloDigitos(numero) {
-  return (numero || "").replace(/[^\d]/g, "");
+  let digitos = (numero || "").replace(/[^\d]/g, "");
+  // BUGFIX: los números de celular argentinos llegan del webhook de WhatsApp con un "9"
+  // extra después del código de país (54) — ej: 5493705263752 — pero si se cargó el
+  // teléfono a mano en /admin sin ese 9 (como se marca normalmente en Argentina, ej:
+  // 543705263752), antes quedaban como dos números "distintos" y nunca matcheaban. Por
+  // eso cocina/barra/salón a veces se trataban como un cliente nuevo en vez de reconocerse
+  // como staff. Acá canonicalizamos SIEMPRE sin ese 9, así cualquier comparación de
+  // teléfonos (llegue como llegue el número) matchea correctamente.
+  if (digitos.startsWith("549") && digitos.length >= 12) {
+    digitos = "54" + digitos.slice(3);
+  }
+  return digitos;
 }
 
 const {
@@ -4026,6 +4037,43 @@ app.post("/admin/switch-save", requireAdminApi, (req, res) => {
 });
 
 // ==================== Editor de configuración (precios, promos, teléfonos, horarios) ====================
+// Normaliza un teléfono argentino a un formato canónico y consistente: "+549" + resto,
+// sin importar cómo lo haya tipeado la persona en /admin (con o sin "9", con o sin "+54",
+// con espacios/guiones, o directamente el número local sin código de país). Así el
+// problema de que un teléfono cargado "distinto" no matchee con el que llega de WhatsApp
+// (soloDigitos ya lo tolera al comparar, pero esto además deja guardado un formato limpio
+// y correcto desde el vamos).
+function normalizarTelefonoArgentino(numero) {
+  let digitos = (numero || "").replace(/[^\d]/g, "");
+  if (!digitos) return "";
+  if (digitos.startsWith("54")) {
+    if (!digitos.startsWith("549")) {
+      digitos = "549" + digitos.slice(2); // le faltaba el "9" de celular
+    }
+  } else if (digitos.startsWith("9")) {
+    digitos = "54" + digitos; // le faltaba el código de país (54)
+  } else {
+    digitos = "549" + digitos; // número local, sin código de país ni "9"
+  }
+  return "+" + digitos;
+}
+
+// Recorre cualquier objeto/array de la config buscando campos "telefono" (string) y los
+// normaliza in-place. Genérico a propósito: cubre equipo[], deliveryConfig[], staff.*, y
+// cualquier otro lugar donde haya un teléfono, presente o futuro, sin tener que listar
+// cada campo a mano.
+function normalizarTelefonosEnConfig(obj) {
+  if (!obj || typeof obj !== "object") return;
+  for (const key of Object.keys(obj)) {
+    const valor = obj[key];
+    if (key === "telefono" && typeof valor === "string" && valor.trim()) {
+      obj[key] = normalizarTelefonoArgentino(valor);
+    } else if (valor && typeof valor === "object") {
+      normalizarTelefonosEnConfig(valor);
+    }
+  }
+}
+
 app.get("/admin/config", requireAdminPage, (_req, res) => {
   res.type("html").send(ADMIN_CONFIG_PAGE);
 });
@@ -4040,6 +4088,7 @@ app.post("/admin/config-save", requireAdminApi, (req, res) => {
     if (!nuevaConfig || typeof nuevaConfig !== "object") {
       return res.status(400).json({ error: "Config inválida" });
     }
+    normalizarTelefonosEnConfig(nuevaConfig);
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(nuevaConfig, null, 2), "utf8");
     console.log("Configuración actualizada desde /admin/config.");
     res.json({ ok: true });
