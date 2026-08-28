@@ -4433,6 +4433,190 @@ async function getFudoApiToken() {
   }
 }
 
+const FUDO_API_GENERAL_BASE = "https://api.fu.do/v1alpha1";
+
+// Helper genérico para llamar a la API general (distinta de la de pedidos — usa Bearer
+// token en vez de los headers custom de la otra integración).
+async function fudoApiFetch(rutaRelativa, options = {}) {
+  const token = await getFudoApiToken();
+  if (!token) return null;
+  try {
+    const response = await fetch(`${FUDO_API_GENERAL_BASE}${rutaRelativa}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+        ...(options.headers || {}),
+      },
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      console.error(`Error en API general de FUDO (${rutaRelativa}):`, response.status, JSON.stringify(data));
+      return null;
+    }
+    return data;
+  } catch (err) {
+    console.error(`Error de red llamando a la API general de FUDO (${rutaRelativa}):`, err);
+    return null;
+  }
+}
+
+// ---- Proveedores de FUDO (para emparejar el proveedor de una factura leída por foto con
+//      el registro real en FUDO) — se cachea 30 minutos ----
+let fudoProveedoresCache = null;
+let fudoProveedoresCacheEn = 0;
+
+async function getFudoProveedores() {
+  if (fudoProveedoresCache && Date.now() - fudoProveedoresCacheEn < 30 * 60 * 1000) {
+    return fudoProveedoresCache;
+  }
+  const data = await fudoApiFetch("/providers?filter[active]=eq.true&page[size]=500");
+  if (data && Array.isArray(data.data)) {
+    fudoProveedoresCache = data.data.map((p) => ({ id: p.id, nombre: p.attributes.name }));
+    fudoProveedoresCacheEn = Date.now();
+    console.log(`Proveedores de FUDO actualizados: ${fudoProveedoresCache.length} proveedor(es).`);
+    return fudoProveedoresCache;
+  }
+  return fudoProveedoresCache || [];
+}
+
+// ---- Categorías de gastos de FUDO (para elegir la categoría correcta al cargar un gasto)
+//      — se cachea 30 minutos. OJO: la ruta "/expense-categories" es la más probable según
+//      el mismo patrón que "/providers", pero no la vimos confirmada en la documentación
+//      — si el primer intento real falla, va a quedar clarísimo en el log de Railway
+//      (error 404), y ahí la corregimos al toque. ----
+let fudoCategoriasGastoCache = null;
+let fudoCategoriasGastoCacheEn = 0;
+
+async function getFudoCategoriasGasto() {
+  if (fudoCategoriasGastoCache && Date.now() - fudoCategoriasGastoCacheEn < 30 * 60 * 1000) {
+    return fudoCategoriasGastoCache;
+  }
+  const data = await fudoApiFetch("/expense-categories?filter[active]=eq.true&page[size]=500");
+  if (data && Array.isArray(data.data)) {
+    fudoCategoriasGastoCache = data.data.map((c) => ({ id: c.id, nombre: c.attributes.name, categoriaFinanciera: c.attributes.financialCategory }));
+    fudoCategoriasGastoCacheEn = Date.now();
+    console.log(`Categorías de gasto de FUDO actualizadas: ${fudoCategoriasGastoCache.length} categoría(s).`);
+    return fudoCategoriasGastoCache;
+  }
+  console.log("No se pudo traer /expense-categories — si el error de arriba es 404, probablemente la ruta real tenga otro nombre (avisame y lo corrijo).");
+  return fudoCategoriasGastoCache || [];
+}
+
+// ---- Ingredientes de FUDO (catálogo + stock actual) — para emparejar los productos de
+//      una factura leída por foto con el ingrediente real, y saber cuánto stock tiene
+//      ANTES de sumarle lo comprado. Se cachea 10 minutos (más corto que el resto, porque
+//      el stock cambia seguido). ----
+let fudoIngredientesCache = null;
+let fudoIngredientesCacheEn = 0;
+
+async function getFudoIngredientes() {
+  if (fudoIngredientesCache && Date.now() - fudoIngredientesCacheEn < 10 * 60 * 1000) {
+    return fudoIngredientesCache;
+  }
+  const data = await fudoApiFetch("/ingredients?page[size]=500");
+  if (data && Array.isArray(data.data)) {
+    fudoIngredientesCache = data.data.map((i) => ({
+      id: i.id,
+      nombre: i.attributes.name,
+      costo: i.attributes.cost,
+      stock: i.attributes.stock,
+      minStock: i.attributes.minStock,
+      stockControl: i.attributes.stockControl,
+    }));
+    fudoIngredientesCacheEn = Date.now();
+    console.log(`Ingredientes de FUDO actualizados: ${fudoIngredientesCache.length} ingrediente(s).`);
+    return fudoIngredientesCache;
+  }
+  return fudoIngredientesCache || [];
+}
+
+// Actualiza un ingrediente en FUDO (ej: sumar stock tras leer una factura).
+// "cambios" es un objeto solo con los attributes que se quieran tocar
+// (cost, minStock, name, price, stock, stockControl).
+async function actualizarIngredienteFudo(id, cambios) {
+  const body = {
+    data: {
+      id: String(id),
+      type: "Ingredient",
+      attributes: cambios,
+    },
+  };
+  const data = await fudoApiFetch(`/ingredients/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+  if (data && data.data) {
+    // Invalidamos el caché de ingredientes para que el próximo getFudoIngredientes()
+    // traiga el stock/costo ya actualizado en vez del valor viejo cacheado.
+    fudoIngredientesCache = null;
+  }
+  return data ? data.data : null;
+}
+
+// Suma stock comprado sobre el stock actual (no lo reemplaza), y de paso actualiza el
+// costo si vino un costo nuevo en la factura.
+async function sumarStockIngrediente(id, cantidadComprada, nuevoCosto = null) {
+  const ingredientes = await getFudoIngredientes();
+  const ingrediente = ingredientes.find((i) => String(i.id) === String(id));
+  if (!ingrediente) throw new Error(`Ingrediente ${id} no encontrado en FUDO`);
+  const nuevoStock = (ingrediente.stock || 0) + cantidadComprada;
+  const cambios = { stock: nuevoStock };
+  if (nuevoCosto !== null) cambios.cost = nuevoCosto;
+  return actualizarIngredienteFudo(id, cambios);
+}
+
+// ---- Medios de pago de FUDO (se cachea 30 minutos) ----
+let fudoPaymentMethodsCache = null;
+let fudoPaymentMethodsCacheEn = 0;
+
+async function getFudoPaymentMethods() {
+  if (fudoPaymentMethodsCache && Date.now() - fudoPaymentMethodsCacheEn < 30 * 60 * 1000) {
+    return fudoPaymentMethodsCache;
+  }
+  const data = await fudoApiFetch("/payment-methods");
+  if (data && Array.isArray(data.data)) {
+    fudoPaymentMethodsCache = data.data.map((pm) => ({
+      id: pm.id,
+      nombre: pm.attributes.name,
+      activo: pm.attributes.active,
+      code: pm.attributes.code,
+      forExpenses: pm.attributes.forExpenses,
+      forSales: pm.attributes.forSales,
+    }));
+    fudoPaymentMethodsCacheEn = Date.now();
+    console.log(`Medios de pago de FUDO actualizados: ${fudoPaymentMethodsCache.length} medio(s).`);
+    return fudoPaymentMethodsCache;
+  }
+  return fudoPaymentMethodsCache || [];
+}
+
+// Busca el id de un medio de pago por nombre (ej: "efectivo", "mercado") en vez de
+// depender de un id fijo hardcodeado.
+async function getFudoPaymentMethodId(nombreBuscado) {
+  const metodos = await getFudoPaymentMethods();
+  const encontrado = metodos.find((m) =>
+    (m.nombre || "").toLowerCase().includes(nombreBuscado.toLowerCase())
+  );
+  if (!encontrado) throw new Error(`Medio de pago "${nombreBuscado}" no encontrado en FUDO`);
+  return encontrado.id;
+}
+
+// RUTA TEMPORAL DE PRUEBA — para ver un gasto real de FUDO con cashRegister, receiptType
+// y commercialDocument incluidos, y así terminar de armar "Create expense". Borrar cuando
+// ya no haga falta.
+app.get("/debug/fudo-expenses", async (req, res) => {
+  try {
+    const data = await fudoApiFetch(
+      "/expenses?include=cashRegister,commercialDocument,expenseCategory,provider,paymentMethod,receiptType&page[size]=1"
+    );
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== Integración con FUDO — pedidos (POS) ====================
 // Documentación: https://dev.fu.do/integrations-api/#overview
 const FUDO_API_BASE = "https://integrations.fu.do/fudo";
