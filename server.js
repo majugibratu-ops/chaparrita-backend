@@ -1372,6 +1372,8 @@ const {
   ADMIN_PASSWORD,
   FUDO_CLIENT_ID,
   FUDO_CLIENT_SECRET,
+  FUDO_API_KEY,
+  FUDO_API_SECRET,
   PORT = 3000,
 } = process.env;
 
@@ -4391,7 +4393,47 @@ async function chequearComandasSinConfirmar() {
 setInterval(chequearComandasSinConfirmar, 5 * 60 * 1000); // cada 5 minutos
 setTimeout(chequearComandasSinConfirmar, 40 * 1000); // primer chequeo a los 40seg de arrancar
 
-// ==================== Integración con FUDO (POS) ====================
+// ==================== API General de FUDO (v1alpha1) — para stock, gastos, etc. ====================
+// Documentación de autenticación confirmada. Todavía NO tenemos la URL base ni el formato
+// exacto de los endpoints de recursos (Gastos, Ingredientes, etc.) — solo el de login, que
+// es lo único que armamos por ahora. El resto se conecta cuando tengamos esa documentación.
+const FUDO_AUTH_URL = "https://auth.fu.do/api";
+
+let fudoApiToken = null;
+let fudoApiTokenExpiraEn = 0; // timestamp en ms
+
+async function getFudoApiToken() {
+  if (fudoApiToken && Date.now() < fudoApiTokenExpiraEn) {
+    return fudoApiToken;
+  }
+  if (!FUDO_API_KEY || !FUDO_API_SECRET) {
+    console.error("Faltan FUDO_API_KEY / FUDO_API_SECRET en las variables de entorno de Railway.");
+    return null;
+  }
+  try {
+    const response = await fetch(FUDO_AUTH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ apiKey: (FUDO_API_KEY || "").trim(), apiSecret: (FUDO_API_SECRET || "").trim() }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.token) {
+      console.error("Error obteniendo token de la API general de FUDO:", JSON.stringify(data));
+      return null;
+    }
+    fudoApiToken = data.token;
+    // La documentación dice que dura 24hs y devuelve "exp" (segundos desde 1970 en formato
+    // string) — lo usamos si viene, si no, asumimos 23hs de margen de seguridad.
+    fudoApiTokenExpiraEn = data.exp ? Number(data.exp) * 1000 - 30 * 60 * 1000 : Date.now() + 23 * 60 * 60 * 1000;
+    console.log("Token de la API general de FUDO renovado correctamente.");
+    return fudoApiToken;
+  } catch (err) {
+    console.error("Error de red obteniendo token de la API general de FUDO:", err);
+    return null;
+  }
+}
+
+// ==================== Integración con FUDO — pedidos (POS) ====================
 // Documentación: https://dev.fu.do/integrations-api/#overview
 const FUDO_API_BASE = "https://integrations.fu.do/fudo";
 
