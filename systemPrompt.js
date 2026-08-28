@@ -22,6 +22,27 @@ function buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoyISO, hor
     .map((p) => `--- ${p.emoji} ${p.nombre} ---\n${p.descripcion}`)
     .join("\n\n");
 
+  // BUGFIX: el "presupuesto a medida" (para grupos que no llegan al mínimo) tenía sus
+  // platos principales hardcodeados (Pizza/Taco Libre/Hamburguesas/Lomitos) sin relación
+  // con los paquetes de arriba — si se borraba un paquete en /admin, acá seguía apareciendo
+  // igual. Ahora solo se ofrece un plato acá si TODAVÍA existe un paquete activo que lo
+  // mencione (por palabra clave en el nombre), así borrar un paquete lo saca de los dos
+  // lados a la vez.
+  const PLATOS_PRESUPUESTO_MEDIDA = [
+    { key: "pizza", label: "Pizza", palabrasClave: ["pizza"], formula: (bp) => `redondeá hacia arriba (personas ÷ 2) × ${money(bp.pizza)} (una pizza rinde para 2 personas)` },
+    { key: "tacos", label: "Taco Libre", palabrasClave: ["taco"], formula: (bp) => `personas × ${money(bp.tacos)} (es por persona, no cada 2)` },
+    { key: "hamburguesas", label: "Hamburguesas", palabrasClave: ["hambur"], formula: (bp) => `personas × ${money(bp.hamburguesas)} (por persona)` },
+    { key: "lomitos", label: "Lomitos", palabrasClave: ["lomo", "lomito"], formula: (bp) => `personas × ${money(bp.lomitos)} (por persona)` },
+  ];
+  const nombresPaquetesActivos = cumple.paquetes.map((p) => (p.nombre || "").toLowerCase());
+  const platosDisponiblesPresupuesto = PLATOS_PRESUPUESTO_MEDIDA.filter((plato) =>
+    nombresPaquetesActivos.some((nombre) => plato.palabrasClave.some((palabra) => nombre.includes(palabra)))
+  );
+  const platosPresupuestoTxt =
+    platosDisponiblesPresupuesto.length > 0
+      ? platosDisponiblesPresupuesto.map((plato) => `   - ${plato.label}: ${plato.formula(cumple.basePrecios)}`).join("\n")
+      : "   (por ahora no hay ningún plato principal cargado — no ofrezcas presupuesto a medida, avisale con onda que por el momento no está disponible esa opción)";
+
   const agotadosTxt = config.agotados.length > 0 ? config.agotados.join(", ") : "ninguno por ahora";
   const promosHoyTxt =
     promosHoy && promosHoy.length > 0
@@ -154,22 +175,21 @@ REGLA PARA ADMINISTRACIÓN/DUEÑO — RESUMEN DE RESERVAS: este número tiene pe
 ${listaPromos}
 ${descripcionesPromos ? `\nDESCRIPCIONES DETALLADAS (usalas completas cuando el cliente pregunte específicamente por una de estas promos, no las resumas de más):\n${descripcionesPromos}\n` : ""}
 
-REGLA IMPORTANTE: dentro de una misma reserva NO SE PUEDEN MEZCLAR platos principales de distintas promos. Todo el grupo tiene que elegir UNA sola promo con UN solo plato principal para todos. Si el cliente pide mezclar, explicale esta regla con onda y ofrecele elegir una sola promo, o armar un presupuesto a medida si de verdad quiere combinar cosas distintas.
+REGLA IMPORTANTE: dentro de una misma reserva NO SE PUEDEN MEZCLAR platos principales de distintas promos. Todo el grupo tiene que elegir UNA sola promo con UN solo plato principal para todos. Si el cliente pide mezclar, contale que hay dos caminos:
+a) Elegir una sola promo para todo el grupo (sin mezclar), o un presupuesto a medida si no llegan al mínimo (ver más abajo).
+b) Ir por MENÚ A LA CARTA en cambio: cada uno pide lo que quiera de la carta normal, a los precios normales de la carta (NO aplican los precios por persona de las promos de cumpleaños, así que no hay un total cerrado de antemano). Igual les regalamos, como agasajo de cumpleaños, una ronda de shots de tequila para el brindis para los mayores de edad que tomen bebidas alcohólicas — para los menores de edad o quienes no tomen alcohol, el shot se reemplaza por jugo de naranja (por la temática mexicana del local). Si elige este camino, guardalo en el campo "promocion" de la reserva como "A la carta". A diferencia de las promos con paquete fijo, acá NO se pide seña (no hay un total fijo para calcularla) — no le pidas transferencia ni comprobante en este caso.
 
 Si el cliente tiene MENOS de ${cumple.minPersonas} personas, ofrecele dos caminos:
 a) Completar hasta ${cumple.minPersonas} personas pagando el precio normal de la promo elegida.
-b) Un presupuesto a la medida, solo con los servicios que elija. Primero preguntá qué plato principal quiere (elige UNO):
-   - Pizza: redondeá hacia arriba (personas ÷ 2) × ${money(cumple.basePrecios.pizza)} (una pizza rinde para 2 personas)
-   - Taco Libre: personas × ${money(cumple.basePrecios.tacos)} (es por persona, no cada 2)
-   - Hamburguesas: personas × ${money(cumple.basePrecios.hamburguesas)} (por persona)
-   - Lomitos: personas × ${money(cumple.basePrecios.lomitos)} (por persona)
+b) Un presupuesto a la medida, solo con los servicios que elija. Primero preguntá qué plato principal quiere (elige UNO, SOLO de estos, no ofrezcas otros):
+${platosPresupuestoTxt}
    Y si además quiere bebida, brindis y/o torta, sumá lo que corresponda:
    - Bebida (Stella Artois 1L): redondeá hacia arriba (personas ÷ 2) × ${money(cumple.basePrecios.bebida)}
    - Brindis: personas × ${money(cumple.basePrecios.shot)}
    - Torta Grido: ${money(cumple.basePrecios.torta)} fija, una sola vez (se reparte entre todos los invitados)
    Sumá los servicios elegidos y aplicale un descuento especial — MUY IMPORTANTE: nunca le digas al cliente el porcentaje exacto del descuento, ni el subtotal antes del descuento. Solo mostrale el total final ya con el descuento aplicado, como "presupuesto a medida".
 
-SEÑA: para cualquier reserva con promo de cumpleaños, pedí una seña del ${cumple.señaPorcentaje * 100}% del total, aclarando que se descuenta del total el día del evento. Pedile que mande el comprobante de la transferencia al alias "${cumple.cuenta.alias}". Cuando diga que ya lo mandó (o adjunte una imagen), agradecé y decile que "nuestro equipo" (NUNCA menciones nombres propios de empleados ni del dueño) va a confirmar la recepción del pago en breve — un humano tiene que confirmarlo, vos no confirmás el pago solo. IMPORTANTE: aclarale siempre, con buena onda, que el monto que quedó confirmado en el presupuesto es el que se abona igual, aunque el día del evento no lleguen a venir todos los invitados que reservó.
+SEÑA: para cualquier reserva con promo de cumpleaños de paquete fijo O presupuesto a medida (es decir, cuando SÍ hay un total cerrado), pedí una seña del ${cumple.señaPorcentaje * 100}% del total, aclarando que se descuenta del total el día del evento. Pedile que mande el comprobante de la transferencia al alias "${cumple.cuenta.alias}". Cuando diga que ya lo mandó (o adjunte una imagen), agradecé y decile que "nuestro equipo" (NUNCA menciones nombres propios de empleados ni del dueño) va a confirmar la recepción del pago en breve — un humano tiene que confirmarlo, vos no confirmás el pago solo. IMPORTANTE: aclarale siempre, con buena onda, que el monto que quedó confirmado en el presupuesto es el que se abona igual, aunque el día del evento no lleguen a venir todos los invitados que reservó. Si en cambio eligió MENÚ A LA CARTA, no corresponde seña (no hay total fijo) — no le pidas nada de esto.
 
 4) SEGUIMIENTO DE ENTREGA: si el cliente comenta que le llegó (o no) un pedido, preguntale cómo estuvo todo. Si estuvo bien, agradecé y ofrecé que cualquier sugerencia para mejorar es bienvenida. Si hubo un problema, pedile que cuente qué pasó, decile que lo vas a anotar en el "Libro de Quejas y Sugerencias" del local para mejorar, agradecé el feedback, y siempre dejá la puerta abierta a que vuelva a escribir cualquier queja o sugerencia cuando quiera.
 
