@@ -4609,7 +4609,10 @@ async function getFudoPaymentMethodId(nombreBuscado) {
 app.get("/debug/fudo-expenses", async (req, res) => {
   try {
     const data = await fudoApiFetch(
-      "/expenses?include=cashRegister,commercialDocument,expenseCategory,provider,paymentMethod,receiptType&page[size]=1"
+      "/expenses?include=cashRegister,commercialDocument,expenseCategory,provider,paymentMethod,receiptType" +
+        "&fields[expenseCategory]=name&fields[cashRegister]=name&fields[commercialDocument]=docUrl,taxes" +
+        "&fields[paymentMethod]=name,code&fields[provider]=name&fields[receiptType]=name" +
+        "&sort=-id&page[size]=20"
     );
     res.json(data);
   } catch (error) {
