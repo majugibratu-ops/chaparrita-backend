@@ -4789,6 +4789,21 @@ app.get("/debug/fudo-expenses", async (req, res) => {
   }
 });
 
+// RUTA TEMPORAL DE PRUEBA — para ver qué tiene guardado el servidor AHORA MISMO en
+// config.cumpleaños.paquetes (y de paso confirmar la ruta real de config.json en disco).
+// Borrar cuando ya no haga falta.
+app.get("/debug/config-paquetes", (req, res) => {
+  try {
+    const config = loadConfig();
+    res.json({
+      configPath: CONFIG_PATH,
+      paquetes: config["cumpleaños"] ? config["cumpleaños"].paquetes : null,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== Integración con FUDO — pedidos (POS) ====================
 // Documentación: https://dev.fu.do/integrations-api/#overview
 const FUDO_API_BASE = "https://integrations.fu.do/fudo";
