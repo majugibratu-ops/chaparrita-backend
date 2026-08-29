@@ -2457,6 +2457,12 @@ async function downloadWhatsappMedia(mediaId) {
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
   });
   const meta = await metaRes.json();
+  if (!meta.url) {
+    // Causa más común: el WHATSAPP_TOKEN venció (los temporales de Meta duran 24hs) o no
+    // tiene permiso sobre este número — hay que generar uno nuevo y actualizar la variable.
+    console.error("No se pudo obtener la URL del archivo de WhatsApp. Respuesta de Meta:", JSON.stringify(meta));
+    throw new Error("WhatsApp no devolvió la URL del archivo — revisar si WHATSAPP_TOKEN venció o es inválido");
+  }
   const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   return { base64: buffer.toString("base64"), mimeType: meta.mime_type };
