@@ -3815,6 +3815,17 @@ app.get("/admin/fudo-stock", requireAdminPage, (_req, res) => {
     '<tbody id="tbodyIng"></tbody>',
     '</table>',
 
+    '<h2 style="margin-top:32px">Bebidas y productos con stock propio</h2>',
+    '<p class="sub" style="margin-top:-4px">Cosas que se compran y venden tal cual (no como receta armada con ingredientes) — bebidas cerradas, por ejemplo.</p>',
+    '<div class="barra-superior">',
+    '<button id="btnActualizarProd">🔄 Traer productos actuales de FUDO</button>',
+    '<span id="msgProd" style="font-size:13px"></span>',
+    '</div>',
+    '<table class="tabla-stock" id="tablaProd" style="display:none">',
+    '<thead><tr><th>Producto</th><th>Stock</th><th>Costo</th><th>Stock mín.</th><th></th></tr></thead>',
+    '<tbody id="tbodyProd"></tbody>',
+    '</table>',
+
     '<h2 style="margin-top:32px">Proveedores</h2>',
     '<p class="sub" style="margin-top:-4px">Ojo: guardar cambios de proveedor todavía no está 100% confirmado en la API de FUDO — si al guardar te da error, avisame para ajustarlo.</p>',
     '<div class="barra-superior">',
@@ -3874,6 +3885,53 @@ app.get("/admin/fudo-stock", requireAdminPage, (_req, res) => {
     '    })',
     '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msgIng").textContent = "Error: " + e.message; } });',
     '}',
+    'function cargarProductos() {',
+    '  document.getElementById("msgProd").textContent = "Consultando FUDO...";',
+    '  fetch("/admin/fudo-productos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      if (!data.ok) { document.getElementById("msgProd").textContent = "Error: " + data.error; return; }',
+    '      var productos = data.productos;',
+    '      document.getElementById("msgProd").textContent = productos.length + " producto(s) — actualizado ahora mismo.";',
+    '      var tbody = document.getElementById("tbodyProd");',
+    '      tbody.innerHTML = "";',
+    '      productos.forEach(function(prod) {',
+    '        var tr = document.createElement("tr");',
+    '        tr.dataset.id = prod.id;',
+    '        var tdNombre = document.createElement("td"); tdNombre.textContent = prod.nombre;',
+    '        var tdStock = document.createElement("td");',
+    '        var inpStock = document.createElement("input"); inpStock.type = "number"; inpStock.step = "any"; inpStock.value = prod.stock;',
+    '        tdStock.appendChild(inpStock);',
+    '        var tdCosto = document.createElement("td");',
+    '        var inpCosto = document.createElement("input"); inpCosto.type = "number"; inpCosto.step = "any"; inpCosto.value = prod.costo;',
+    '        tdCosto.appendChild(inpCosto);',
+    '        var tdMin = document.createElement("td");',
+    '        var inpMin = document.createElement("input"); inpMin.type = "number"; inpMin.step = "any"; inpMin.value = prod.minStock;',
+    '        tdMin.appendChild(inpMin);',
+    '        var tdBtn = document.createElement("td");',
+    '        var btnGuardar = document.createElement("button"); btnGuardar.textContent = "Guardar"; btnGuardar.className = "secundario";',
+    '        [inpStock, inpCosto, inpMin].forEach(function(inp){ inp.addEventListener("input", function(){ tr.classList.add("fila-cambiada"); }); });',
+    '        btnGuardar.addEventListener("click", function(){',
+    '          btnGuardar.disabled = true; btnGuardar.textContent = "Guardando...";',
+    '          fetch("/admin/fudo-producto-actualizar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({',
+    '            id: prod.id, stock: parseFloat(inpStock.value), cost: parseFloat(inpCosto.value), minStock: parseFloat(inpMin.value)',
+    '          })})',
+    '            .then(function(r){ return r.json(); })',
+    '            .then(function(resultado){',
+    '              if (!resultado.ok) { alert("Error: " + resultado.error); btnGuardar.disabled = false; btnGuardar.textContent = "Guardar"; return; }',
+    '              btnGuardar.textContent = "✅ Guardado"; tr.classList.remove("fila-cambiada");',
+    '              setTimeout(function(){ btnGuardar.textContent = "Guardar"; btnGuardar.disabled = false; }, 1500);',
+    '            })',
+    '            .catch(function(e){ alert("Error: " + e.message); btnGuardar.disabled = false; btnGuardar.textContent = "Guardar"; });',
+    '        });',
+    '        tdBtn.appendChild(btnGuardar);',
+    '        tr.appendChild(tdNombre); tr.appendChild(tdStock); tr.appendChild(tdCosto); tr.appendChild(tdMin); tr.appendChild(tdBtn);',
+    '        tbody.appendChild(tr);',
+    '      });',
+    '      document.getElementById("tablaProd").style.display = "table";',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msgProd").textContent = "Error: " + e.message; } });',
+    '}',
     'function cargarProveedores() {',
     '  document.getElementById("msgProv").textContent = "Consultando FUDO...";',
     '  fetch("/admin/fudo-proveedores-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
@@ -3918,8 +3976,10 @@ app.get("/admin/fudo-stock", requireAdminPage, (_req, res) => {
     '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msgProv").textContent = "Error: " + e.message; } });',
     '}',
     'document.getElementById("btnActualizarIng").addEventListener("click", cargarIngredientes);',
+    'document.getElementById("btnActualizarProd").addEventListener("click", cargarProductos);',
     'document.getElementById("btnActualizarProv").addEventListener("click", cargarProveedores);',
     'cargarIngredientes();',
+    'cargarProductos();',
     'cargarProveedores();',
     '</' + 'script>',
     '</div>',
@@ -3951,6 +4011,33 @@ app.post("/admin/fudo-ingrediente-actualizar", requireAdminApi, async (req, res)
     res.json({ ok: true, ingrediente: actualizado });
   } catch (err) {
     console.error("Error actualizando ingrediente desde /admin:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/admin/fudo-productos-data", requireAdminApi, async (_req, res) => {
+  try {
+    const productos = await getFudoProductosConStock(true); // true = forzar datos frescos de FUDO
+    res.json({ ok: true, productos });
+  } catch (err) {
+    console.error("Error trayendo productos de FUDO para /admin:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/admin/fudo-producto-actualizar", requireAdminApi, async (req, res) => {
+  try {
+    const { id, stock, cost, minStock } = req.body;
+    if (!id) return res.status(400).json({ ok: false, error: "Falta el id del producto" });
+    const cambios = {};
+    if (!isNaN(stock)) cambios.stock = stock;
+    if (!isNaN(cost)) cambios.cost = cost;
+    if (!isNaN(minStock)) cambios.minStock = minStock;
+    const actualizado = await actualizarProductoFudo(id, cambios);
+    if (!actualizado) return res.status(500).json({ ok: false, error: "FUDO no devolvió el producto actualizado — puede que la ruta de Update product no sea la esperada, revisar log de Railway" });
+    res.json({ ok: true, producto: actualizado });
+  } catch (err) {
+    console.error("Error actualizando producto desde /admin:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -4997,6 +5084,57 @@ async function sumarStockIngrediente(id, cantidadComprada, nuevoCosto = null) {
   return actualizarIngredienteFudo(id, cambios);
 }
 
+// ---- Productos con stock propio en FUDO (bebidas y otros que se venden tal cual, no como
+//      receta armada con ingredientes — ej: una gaseosa cerrada). Se cachea 10 minutos,
+//      igual que ingredientes. NOTA: esto es la API GENERAL de FUDO (v1alpha1, fudoApiFetch)
+//      — no confundir con getFudoProductos() más abajo, que es el catálogo de venta al
+//      cliente para pedidos (API de pedidos/POS, fudoFetch, otra cosa completamente distinta).
+let fudoProductosStockCache = null;
+let fudoProductosStockCacheEn = 0;
+
+async function getFudoProductosConStock(forzarActualizacion = false) {
+  if (!forzarActualizacion && fudoProductosStockCache && Date.now() - fudoProductosStockCacheEn < 10 * 60 * 1000) {
+    return fudoProductosStockCache;
+  }
+  const data = await fudoApiFetch("/products?page[size]=500");
+  if (data && Array.isArray(data.data)) {
+    fudoProductosStockCache = data.data.map((p) => ({
+      id: p.id,
+      nombre: p.attributes.name,
+      costo: p.attributes.cost,
+      stock: p.attributes.stock,
+      minStock: p.attributes.minStock,
+      stockControl: p.attributes.stockControl,
+    }));
+    fudoProductosStockCacheEn = Date.now();
+    console.log(`Productos (stock) de FUDO actualizados: ${fudoProductosStockCache.length} producto(s).`);
+    return fudoProductosStockCache;
+  }
+  return fudoProductosStockCache || [];
+}
+
+// Actualiza un producto (stock/costo/etc). OJO: igual que con proveedores, la ruta sigue el
+// mismo patrón que "Update ingredient" (PATCH /products/{id}) pero no la vimos confirmada
+// en la documentación — si falla, revisar el log de Railway.
+async function actualizarProductoFudo(id, cambios) {
+  const body = { data: { id: String(id), type: "Product", attributes: cambios } };
+  const data = await fudoApiFetch(`/products/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+  if (data && data.data) fudoProductosStockCache = null;
+  return data ? data.data : null;
+}
+
+// Suma stock comprado a un PRODUCTO (no ingrediente) — misma lógica que
+// sumarStockIngrediente pero para bebidas/productos con stock propio.
+async function sumarStockProducto(id, cantidadComprada, nuevoCosto = null) {
+  const productos = await getFudoProductosConStock();
+  const producto = productos.find((p) => String(p.id) === String(id));
+  if (!producto) throw new Error(`Producto ${id} no encontrado en FUDO`);
+  const nuevoStock = (producto.stock || 0) + cantidadComprada;
+  const cambios = { stock: nuevoStock };
+  if (nuevoCosto !== null) cambios.cost = nuevoCosto;
+  return actualizarProductoFudo(id, cambios);
+}
+
 // ---- Medios de pago de FUDO (se cachea 30 minutos) ----
 let fudoPaymentMethodsCache = null;
 let fudoPaymentMethodsCacheEn = 0;
@@ -5382,19 +5520,22 @@ function matchearProveedorFudo(nombreLeido, proveedoresFudo) {
   );
 }
 
-// Empareja los ítems de la factura (texto libre, como los escribió/leyó la IA) con los
-// ingredientes reales de FUDO, usando Claude (mismo enfoque que matchearItemsConFudo para
-// pedidos). Devuelve solo los que se pudieron emparejar con confianza.
-const FUDO_MATCH_INGREDIENTES_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de una factura de un proveedor con el catálogo real de ingredientes de un restaurante (en su sistema FUDO). Te paso la lista de ítems de la factura (nombre tal como aparece impreso, puede tener abreviaturas o mayúsculas raras) y el catálogo real de ingredientes con sus IDs.
+// Empareja los ítems de la factura (texto libre, como los escribió/leyó la IA) con el
+// catálogo real de FUDO — que son DOS catálogos distintos: ingredientes (para recetas
+// armadas) y productos (cosas que se venden tal cual, como una gaseosa cerrada — las bebidas
+// suelen estar acá). Le pasamos los dos juntos a Claude para que elija el correcto y no
+// arriesgue a matchear el mismo ítem dos veces.
+const FUDO_MATCH_INGREDIENTES_SYSTEM_PROMPT = `Sos un asistente que empareja los ítems de una factura de un proveedor con el catálogo real de un restaurante (en su sistema FUDO). Te paso la lista de ítems de la factura (nombre tal como aparece impreso, puede tener abreviaturas o mayúsculas raras) y DOS catálogos reales con sus IDs: uno de INGREDIENTES (insumos que se usan en recetas) y otro de PRODUCTOS (cosas que se venden/compran tal cual, como bebidas cerradas).
 
-Para cada ítem de la factura, encontrá el ingrediente que mejor corresponda por nombre (aunque no sea idéntico, ej. "COCA COLA 1.5L" puede corresponder a "Coca Cola 1,5L"). Si un ítem de la factura no tiene ningún ingrediente razonable en el catálogo, marcalo como no encontrado (no inventes un ID falso).
+Para cada ítem de la factura, buscá en AMBOS catálogos y encontrá la mejor coincidencia por nombre (aunque no sea idéntica, ej. "COCA COLA 1.5L" puede corresponder a "Coca Cola 1,5L"). Decidí en cuál de los dos catálogos está — un mismo ítem NUNCA está en los dos a la vez. Si no hay ninguna coincidencia razonable en ninguno de los dos, marcalo como no encontrado (no inventes un ID falso).
 
 Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
-{"items": [{"ingredientId": "12", "cantidad": 10, "costoUnitario": 500, "encontrado": true}, {"encontrado": false, "textoOriginal": "algo que no está en el catálogo"}]}`;
+{"items": [{"tipo": "ingredient", "id": "12", "cantidad": 10, "costoUnitario": 500, "encontrado": true}, {"tipo": "product", "id": "7", "cantidad": 6, "costoUnitario": 800, "encontrado": true}, {"encontrado": false, "textoOriginal": "algo que no está en ninguno de los dos catálogos"}]}`;
 
-async function matchearIngredientesFactura(itemsFactura, ingredientesFudo) {
+async function matchearIngredientesFactura(itemsFactura, ingredientesFudo, productosFudo) {
   try {
-    const catalogoTexto = ingredientesFudo.map((i) => `id:${i.id} - ${i.nombre}`).join("\n");
+    const catalogoIngredientesTexto = ingredientesFudo.map((i) => `id:${i.id} - ${i.nombre}`).join("\n");
+    const catalogoProductosTexto = productosFudo.map((p) => `id:${p.id} - ${p.nombre}`).join("\n");
     const itemsTexto = itemsFactura
       .map((it) => `${it.cantidad || "?"} x "${it.producto}" — costo unitario $${it.costoUnitario || "?"}`)
       .join("\n");
@@ -5412,14 +5553,14 @@ async function matchearIngredientesFactura(itemsFactura, ingredientesFudo) {
         messages: [
           {
             role: "user",
-            content: `CATÁLOGO DE INGREDIENTES:\n${catalogoTexto}\n\nÍTEMS DE LA FACTURA:\n${itemsTexto}`,
+            content: `CATÁLOGO DE INGREDIENTES:\n${catalogoIngredientesTexto}\n\nCATÁLOGO DE PRODUCTOS (bebidas y afines):\n${catalogoProductosTexto}\n\nÍTEMS DE LA FACTURA:\n${itemsTexto}`,
           },
         ],
       }),
     });
     const data = await response.json();
     if (!response.ok) {
-      console.error("Error de la API de Claude al matchear ingredientes de factura:", data);
+      console.error("Error de la API de Claude al matchear ítems de factura:", data);
       return [];
     }
     const textoRespuesta = (data.content || [])
@@ -5432,7 +5573,7 @@ async function matchearIngredientesFactura(itemsFactura, ingredientesFudo) {
     const parsed = JSON.parse(jsonMatch[0]);
     return Array.isArray(parsed.items) ? parsed.items : [];
   } catch (err) {
-    console.error("Error matcheando ingredientes de factura con Claude:", err);
+    console.error("Error matcheando ítems de factura con Claude:", err);
     return [];
   }
 }
@@ -5503,8 +5644,8 @@ async function cargarFacturaEnFudo(datosFactura, medioPagoTexto, useInCashCount)
 // desde /admin (nunca automáticamente al confirmar por WhatsApp). Matchea los ítems de la
 // factura con los ingredientes reales y suma lo comprado a cada uno.
 async function aplicarStockDeFactura(datosFactura) {
-  const ingredientesFudo = await getFudoIngredientes();
-  const itemsMatch = await matchearIngredientesFactura(datosFactura.items || [], ingredientesFudo);
+  const [ingredientesFudo, productosFudo] = await Promise.all([getFudoIngredientes(), getFudoProductosConStock()]);
+  const itemsMatch = await matchearIngredientesFactura(datosFactura.items || [], ingredientesFudo, productosFudo);
   const aplicados = [];
   const sinMatchear = [];
   for (const item of itemsMatch) {
@@ -5513,11 +5654,15 @@ async function aplicarStockDeFactura(datosFactura) {
       continue;
     }
     try {
-      await sumarStockIngrediente(item.ingredientId, Number(item.cantidad) || 0, item.costoUnitario ?? null);
-      aplicados.push(item.textoOriginal || item.ingredientId);
+      if (item.tipo === "product") {
+        await sumarStockProducto(item.id, Number(item.cantidad) || 0, item.costoUnitario ?? null);
+      } else {
+        await sumarStockIngrediente(item.id, Number(item.cantidad) || 0, item.costoUnitario ?? null);
+      }
+      aplicados.push(item.textoOriginal || item.id);
     } catch (errStock) {
-      console.error("Error sumando stock de un ingrediente de factura:", errStock);
-      sinMatchear.push(`${item.textoOriginal || item.ingredientId} (error al sumar stock)`);
+      console.error("Error sumando stock de un ítem de factura:", errStock);
+      sinMatchear.push(`${item.textoOriginal || item.id} (error al sumar stock)`);
     }
   }
   return { aplicados, sinMatchear };
