@@ -4586,7 +4586,7 @@ function normalizarTelefonosEnConfig(obj) {
 }
 
 app.get("/admin/config", requireAdminPage, (_req, res) => {
-  if (ES_STAGING) {
+  if (ES_STAGING === "true") {
     // Solo en staging: un banner arriba de todo con un botón para traer la config real.
     const bannerStaging = `
       <div style="max-width:700px;margin:16px auto 0;padding:14px 16px;background:#fff3cd;border:1px solid #ffe08a;border-radius:10px;font-size:13.5px;">
@@ -4641,7 +4641,7 @@ app.post("/admin/config-save", requireAdminApi, (req, res) => {
 const CHAPARRITA_URL_PRODUCCION = "https://chaparrita-backend-production.up.railway.app";
 
 app.post("/admin/importar-config-desde-produccion", requireAdminApi, async (req, res) => {
-  if (!ES_STAGING) {
+  if (ES_STAGING !== "true") {
     return res.status(403).json({ error: "Esto solo está habilitado en staging (falta la variable ES_STAGING en este entorno)." });
   }
   try {
