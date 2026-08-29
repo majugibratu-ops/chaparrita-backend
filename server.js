@@ -1385,6 +1385,7 @@ const {
   FUDO_CLIENT_SECRET,
   FUDO_API_KEY,
   FUDO_API_SECRET,
+  ES_STAGING,
   PORT = 3000,
 } = process.env;
 
@@ -4585,6 +4586,30 @@ function normalizarTelefonosEnConfig(obj) {
 }
 
 app.get("/admin/config", requireAdminPage, (_req, res) => {
+  if (ES_STAGING) {
+    // Solo en staging: un banner arriba de todo con un botón para traer la config real.
+    const bannerStaging = `
+      <div style="max-width:700px;margin:16px auto 0;padding:14px 16px;background:#fff3cd;border:1px solid #ffe08a;border-radius:10px;font-size:13.5px;">
+        🧪 <b>Entorno de STAGING.</b> ¿Config vacía o desactualizada?
+        <button id="btnImportarConfig" style="margin-left:8px;padding:6px 12px;font-size:13px;">Traer configuración real</button>
+        <span id="msgImportarConfig" style="margin-left:8px;"></span>
+      </div>
+      <script>
+        document.getElementById("btnImportarConfig").addEventListener("click", function(){
+          var btn = this;
+          btn.disabled = true; btn.textContent = "Importando...";
+          fetch("/admin/importar-config-desde-produccion", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              if (data.error) { document.getElementById("msgImportarConfig").textContent = "❌ " + data.error; btn.disabled = false; btn.textContent = "Traer configuración real"; return; }
+              document.getElementById("msgImportarConfig").textContent = "✅ Listo, recargando...";
+              setTimeout(function(){ window.location.reload(); }, 1200);
+            })
+            .catch(function(e){ document.getElementById("msgImportarConfig").textContent = "❌ " + e.message; btn.disabled = false; btn.textContent = "Traer configuración real"; });
+        });
+      </script>`;
+    return res.type("html").send(ADMIN_CONFIG_PAGE.replace("<body>", "<body>" + bannerStaging));
+  }
   res.type("html").send(ADMIN_CONFIG_PAGE);
 });
 
@@ -4605,6 +4630,52 @@ app.post("/admin/config-save", requireAdminApi, (req, res) => {
   } catch (err) {
     console.error("Error al guardar config:", err);
     res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+// Trae una copia de la configuración REAL (producción) y la pisa acá — solo pensado para
+// arrancar un ambiente de staging con datos de partida (equipo, horarios, menú, etc.) en vez
+// de un config.json vacío. SALVAGUARDA: solo funciona si este entorno tiene la variable
+// ES_STAGING=true cargada — nunca puede correr por error en producción, porque ahí esa
+// variable no existe.
+const CHAPARRITA_URL_PRODUCCION = "https://chaparrita-backend-production.up.railway.app";
+
+app.post("/admin/importar-config-desde-produccion", requireAdminApi, async (req, res) => {
+  if (!ES_STAGING) {
+    return res.status(403).json({ error: "Esto solo está habilitado en staging (falta la variable ES_STAGING en este entorno)." });
+  }
+  try {
+    if (!ADMIN_PASSWORD) {
+      return res.status(500).json({ error: "Falta ADMIN_PASSWORD en este entorno" });
+    }
+    const loginRes = await fetch(`${CHAPARRITA_URL_PRODUCCION}/admin/login-check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+    });
+    if (!loginRes.ok) {
+      return res.status(502).json({ error: "No se pudo iniciar sesión en el backend real — revisar que ADMIN_PASSWORD sea igual en los dos entornos" });
+    }
+    const cookie = loginRes.headers.get("set-cookie");
+    if (!cookie) {
+      return res.status(502).json({ error: "El backend real no devolvió cookie de sesión" });
+    }
+
+    const configRes = await fetch(`${CHAPARRITA_URL_PRODUCCION}/admin/config-data`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({}),
+    });
+    if (!configRes.ok) {
+      return res.status(502).json({ error: "No se pudo traer la configuración del backend real" });
+    }
+    const configReal = await configRes.json();
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(configReal, null, 2), "utf8");
+    console.log("Configuración importada desde producción a este entorno de staging.");
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error importando configuración desde producción:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
