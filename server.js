@@ -1324,8 +1324,6 @@ const pendingCantidadCompras = new Map();
 // ---- Pedidos esperando confirmación de que ya se cargaron en el sistema (FUDO u otro):
 //      telefonoDeQuienDebeConfirmar (normalizado) -> [{id, resumen, clientePhone, creadaEn}] ----
 const pendingComandas = new Map();
-// Evita avisarle al cliente más de una vez si varias personas confirman el mismo pedido.
-const comandasYaAvisadasAlCliente = new Set();
 
 // ---- Evita procesar el mismo pedido confirmado más de una vez (por ejemplo si el
 //      cliente escribe "sí" o "confirmo" varias veces seguidas) — telefono -> {resumen, procesadoEn} ----
@@ -1700,6 +1698,10 @@ app.post("/webhook", async (req, res) => {
     const telQuienResponde = soloDigitos(from);
     const pareceConfirmacionCorta = message.type === "text" && message.text.body.trim().length <= 60 && (message.text.body.match(/\n/g) || []).length <= 1;
     if (pareceConfirmacionCorta && pendingComandas.has(telQuienResponde) && pendingComandas.get(telQuienResponde).length > 0) {
+      // pendingComandas hoy contiene dos tipos de control: confirmación de reserva agendada,
+      // y confirmación de cocina de que le llegó bien la comanda impresa (el viejo caso
+      // "cajero" con número de pedido + link de FUDO se sacó, quedó obsoleto al integrar
+      // el pedido automático con FUDO).
       const cola = pendingComandas.get(telQuienResponde);
       const confirmado = cola.shift();
       if (cola.length === 0) {
@@ -1715,18 +1717,17 @@ app.post("/webhook", async (req, res) => {
 
       const avisoRestante = cola.length > 0 ? ` Todavía te queda${cola.length === 1 ? "" : "n"} ${cola.length} pedido${cola.length === 1 ? "" : "s"} más por confirmar.` : "";
 
-      if (confirmado.tipo === "reserva") {
-        // Control puramente interno: el cliente ya recibió su confirmación normal del
-        // bot cuando se armó la reserva, acá no le mandamos nada más.
-        await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar que quedó agendada! 🙌${avisoRestante}`);
-      } else {
-        // Tipo "cajero": le reenviamos su respuesta (número de pedido + link) tal cual al
-        // cliente, solo una vez aunque varias personas confirmen el mismo pedido.
-        if (!comandasYaAvisadasAlCliente.has(confirmado.id)) {
-          comandasYaAvisadasAlCliente.add(confirmado.id);
-          await sendWhatsappText(confirmado.clientePhone, `¡Tu pedido ya está cargado en el sistema! 📦 Podés seguirlo acá:\n\n${textoRespuesta}`);
+      if (confirmado.tipo === "comanda_cocina") {
+        const dijoQueNoLlego = /\bno\b/i.test(textoRespuesta) && !/\bsi\b|\bsí\b/i.test(textoRespuesta);
+        if (dijoQueNoLlego) {
+          await sendWhatsappText(from, `Anotado, gracias por avisar 🙏 Revisá la impresora — si hace falta, pedile el pedido de nuevo a quien lo cargó.${avisoRestante}`);
+        } else {
+          await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar! 👨‍🍳${avisoRestante}`);
         }
-        await sendWhatsappText(from, `¡Buenísimo, gracias! Ya se lo reenvié al cliente. 🙌${avisoRestante}`);
+      } else {
+        // Control puramente interno: el cliente ya recibió su confirmación normal del bot
+        // cuando se armó la reserva, acá no le mandamos nada más.
+        await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar que quedó agendada! 🙌${avisoRestante}`);
       }
       return;
     }
@@ -2089,10 +2090,12 @@ app.post("/webhook", async (req, res) => {
         }
         const avisosActivos = equipoConPermiso(config, "recibeReservas");
         const idComandaReserva = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
-        const mensajeConSolicitud = `${reservaConfirmada}\n\n¿Me confirmás que ya quedó agendada? Contestame "sí" cuando esté 🙏`;
         for (const aviso of avisosActivos) {
           const telAviso = soloDigitos(aviso.telefono);
-          await sendWhatsappText(telAviso, mensajeConSolicitud);
+          await sendWhatsappText(telAviso, reservaConfirmada);
+          await sendWhatsappButtons(telAviso, "¿Me confirmás que ya quedó agendada?", [
+            { id: "reserva_confirmada", titulo: "Sí, confirmado ✅" },
+          ]);
           const cola = pendingComandas.get(telAviso) || [];
           cola.push({ id: idComandaReserva, tipo: "reserva", resumen: reservaConfirmada, clientePhone: from, creadaEn: Date.now() });
           pendingComandas.set(telAviso, cola);
@@ -2126,7 +2129,6 @@ app.post("/webhook", async (req, res) => {
         ultimoPedidoConfirmadoPorCliente.set(soloDigitos(from), { itemsNormalizados, procesadoEn: Date.now() });
 
       const avisosPedido = equipoConPermiso(config, "recibePedidos");
-      const idComanda = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 
       // Intentamos crear el pedido automáticamente en FUDO primero. Si no se puede (por
       // cualquier motivo: catálogo no matcheado, error de red, etc.), seguimos con el
@@ -2166,17 +2168,32 @@ app.post("/webhook", async (req, res) => {
         const telAviso = soloDigitos(aviso.telefono);
         const esCocina = aviso.areaCompras === "cocina";
         if (esCocina) {
-          // A cocina le llega el pedido normal, sin pedirle que confirme nada.
+          // A cocina le llega el pedido normal, y le pedimos que confirme que le llegó
+          // bien la comanda impresa — es un control real (si dice que no, puede ser que
+          // falló la impresora), distinto del viejo pedido de número+link que ya no hace
+          // falta (ese se sacó al integrar el pedido automático con FUDO).
           await sendWhatsappText(telAviso, pedidoConfirmado);
+          await sendWhatsappButtons(telAviso, "¿Te llegó bien la comanda impresa?", [
+            { id: "comanda_recibida", titulo: "Sí, recibida ✅" },
+            { id: "comanda_no_recibida", titulo: "No, revisar 🖨️" },
+          ]);
+          const colaCocina = pendingComandas.get(telAviso) || [];
+          colaCocina.push({
+            id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+            tipo: "comanda_cocina",
+            resumen: pedidoConfirmado,
+            clientePhone: from,
+            creadaEn: Date.now(),
+          });
+          pendingComandas.set(telAviso, colaCocina);
         } else if (resultadoFudo.ok) {
-          // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle que
-          // tipee el número de pedido a mano.
+          // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle nada más.
           await sendWhatsappText(telAviso, `✅ Este pedido ya se cargó solo en FUDO:\n\n${pedidoConfirmado}`);
         } else {
-          await sendWhatsappText(telAviso, `${pedidoConfirmado}\n\n¿Me pasás el número de pedido y el link de seguimiento de FUDO para avisarle al cliente? Por ejemplo: "Pedido #5815 - https://..." 🙏`);
-          const cola = pendingComandas.get(telAviso) || [];
-          cola.push({ id: idComanda, tipo: "cajero", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
-          pendingComandas.set(telAviso, cola);
+          // El auto-cargado a FUDO falló — se lo pasamos igual para que lo carguen a mano,
+          // pero ya no hace falta pedirle que tipee el número de pedido/link de vuelta acá
+          // (con la integración a FUDO ese paso quedó obsoleto).
+          await sendWhatsappText(telAviso, `⚠️ Este pedido no se pudo cargar solo en FUDO, hace falta cargarlo a mano:\n\n${pedidoConfirmado}`);
         }
       }
 
@@ -2407,13 +2424,21 @@ app.post("/webhook", async (req, res) => {
       const staffPhones = equipoConPermiso(config, "confirmaComprobantes")
         .map((s) => soloDigitos(s.telefono))
         .filter((tel) => tel && tel.length >= 10);
-      const captionAviso = `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación. Contestame acá mismo con "sí" o "no" (o contame el motivo si no es válido) para que se lo reenvíe automáticamente.`;
+      const captionAviso = `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación.`;
       for (const tel of staffPhones) {
         if (message.type === "image") {
           await sendWhatsappImage(tel, message.image.id, captionAviso);
         } else {
           await sendWhatsappDocument(tel, message.document.id, captionAviso, message.document.filename || "comprobante.pdf");
         }
+        // Las imágenes/documentos no admiten botones en el mismo mensaje (limitación de
+        // WhatsApp), así que los botones van en un mensaje aparte, justo después. Si el
+        // motivo del rechazo no encaja en un botón, el staff igual puede escribirlo como
+        // texto libre — el flujo de arriba lo sigue aceptando igual que antes.
+        await sendWhatsappButtons(tel, "¿Confirmás el pago? (o escribime el motivo si hay algún problema)", [
+          { id: "comprobante_confirmado", titulo: "Sí, confirmado ✅" },
+          { id: "comprobante_rechazado", titulo: "No, hay problema" },
+        ]);
         pendingComprobantes.set(tel, { customerPhone: from, askedAt: Date.now() });
       }
     }
@@ -5033,10 +5058,18 @@ async function chequearComandasSinConfirmar() {
       if (cola.length === 0) continue;
       const masVieja = cola[0];
       if (ahora - masVieja.creadaEn >= QUINCE_MIN && !masVieja.recordatorioEnviado) {
-        const mensaje = masVieja.tipo === "reserva"
-          ? `¡Che! 👋 ¿Me confirmás que esta reserva ya quedó agendada?\n\n${masVieja.resumen}`
-          : `¡Che! 👋 ¿Me pasás el número de pedido y el link de FUDO de este pedido, para avisarle al cliente?\n\n${masVieja.resumen}`;
-        await sendWhatsappText(telefono, mensaje);
+        if (masVieja.tipo === "comanda_cocina") {
+          await sendWhatsappText(telefono, `¡Che! 👋 ¿Te llegó bien esta comanda impresa?\n\n${masVieja.resumen}`);
+          await sendWhatsappButtons(telefono, "¿Te llegó bien la comanda impresa?", [
+            { id: "comanda_recibida", titulo: "Sí, recibida ✅" },
+            { id: "comanda_no_recibida", titulo: "No, revisar 🖨️" },
+          ]);
+        } else {
+          await sendWhatsappText(telefono, `¡Che! 👋 ¿Me confirmás que esta reserva ya quedó agendada?\n\n${masVieja.resumen}`);
+          await sendWhatsappButtons(telefono, "¿Ya quedó agendada?", [
+            { id: "reserva_confirmada", titulo: "Sí, confirmado ✅" },
+          ]);
+        }
         masVieja.recordatorioEnviado = true;
         console.log(`Recordatorio de comanda sin confirmar enviado a ${telefono} (comanda ${masVieja.id}, tipo ${masVieja.tipo}).`);
       }
