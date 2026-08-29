@@ -862,8 +862,8 @@ const ADMIN_BASE_CSS = `
   button { font-family: inherit; font-size: 13.5px; padding: 10px 16px; border: none; border-radius: var(--radio-chico); cursor: pointer; margin-top: 10px; font-weight: 600; transition: all .15s ease; }
   .btn-primary { background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); color: #fff; box-shadow: 0 6px 16px -6px rgba(37,211,102,0.45); }
   .btn-primary:hover { filter: brightness(1.08); }
-  .btn-secondary { background: var(--bg-elevado); color: var(--texto); border: 1px solid var(--borde); }
-  .btn-secondary:hover { border-color: var(--turquesa); }
+  .btn-secondary, .secundario { background: var(--bg-elevado); color: var(--texto); border: 1px solid var(--borde); }
+  .btn-secondary:hover, .secundario:hover { border-color: var(--turquesa); }
   .btn-danger { background: transparent; color: var(--coral); padding: 5px 9px; margin: 0; border: 1px solid transparent; }
   .btn-danger:hover { background: rgba(232,103,74,0.1); }
   button:disabled { opacity: 0.5; cursor: default; }
@@ -4589,10 +4589,11 @@ app.get("/admin/config", requireAdminPage, (_req, res) => {
   if (ES_STAGING === "true") {
     // Solo en staging: un banner arriba de todo con un botón para traer la config real.
     const bannerStaging = `
-      <div style="max-width:700px;margin:16px auto 0;padding:14px 16px;background:#fff3cd;border:1px solid #ffe08a;border-radius:10px;font-size:13.5px;">
-        🧪 <b>Entorno de STAGING.</b> ¿Config vacía o desactualizada?
-        <button id="btnImportarConfig" style="margin-left:8px;padding:6px 12px;font-size:13px;">Traer configuración real</button>
-        <span id="msgImportarConfig" style="margin-left:8px;"></span>
+      <div style="max-width:700px;margin:16px auto 0;padding:14px 16px;background:var(--card);border:1px solid var(--alerta);border-radius:var(--radio);font-size:13.5px;color:var(--texto);">
+        <span style="color:var(--alerta);font-weight:700;">🧪 Entorno de STAGING</span>
+        <span style="color:var(--texto-tenue);"> — ¿config vacía o desactualizada?</span>
+        <button id="btnImportarConfig" class="secundario" style="margin-left:8px;margin-top:0;padding:7px 14px;font-size:12.5px;">Traer configuración real</button>
+        <span id="msgImportarConfig" style="margin-left:8px;color:var(--texto-tenue);"></span>
       </div>
       <script>
         document.getElementById("btnImportarConfig").addEventListener("click", function(){
