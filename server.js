@@ -1385,6 +1385,7 @@ const {
   FUDO_CLIENT_SECRET,
   FUDO_API_KEY,
   FUDO_API_SECRET,
+  ES_STAGING,
   PORT = 3000,
 } = process.env;
 
@@ -1528,6 +1529,21 @@ app.post("/webhook", async (req, res) => {
     const from = message.from; // número del cliente (o del cadete, si nos está contestando)
     console.log(`Mensaje recibido de ${from}, tipo: ${message.type}`);
 
+    // Si tocó un botón o una opción de lista, lo convertimos a un mensaje de texto normal
+    // ACÁ MISMO, antes de que el resto del código lo vea — así todos los flujos que ya
+    // esperan message.type === "text" (facturas, comandas, compras, reservas, etc.) siguen
+    // funcionando sin cambios, sin importar si la respuesta vino tocando un botón o
+    // escribiendo. El "id" del botón queda en message.interactive.* por si algún flujo
+    // nuevo lo necesita más preciso que el texto del título.
+    if (message.type === "interactive") {
+      const reply = message.interactive?.button_reply || message.interactive?.list_reply;
+      if (reply) {
+        message.type = "text";
+        message.text = { body: reply.title };
+        console.log(`(Era un botón/lista — id: "${reply.id}", convertido a texto: "${reply.title}")`);
+      }
+    }
+
     const config = loadConfig();
     if (config.asistenteActivo === false) {
       console.log("El asistente está apagado (asistenteActivo=false) — no se responde, queda para que lo atienda un operador.");
@@ -1653,6 +1669,17 @@ app.post("/webhook", async (req, res) => {
           const resumenFactura = construirResumenFactura(datosFactura);
           await sendWhatsappText(from, resumenFactura);
           agregarMensajeInbox(from, "chaparrita", resumenFactura);
+          await sendWhatsappList(from, "¿Cómo se pagó?", "Elegir medio de pago", [
+            {
+              titulo: "Medio de pago",
+              filas: [
+                { id: "factura_efectivo_caja", titulo: "Efectivo caja", desc: "Sale de la caja física de Chaparrita" },
+                { id: "factura_efectivo_reserva", titulo: "Efectivo reserva", desc: "Sale de tu reserva personal" },
+                { id: "factura_mercadopago", titulo: "Mercadopago", desc: "" },
+                { id: "factura_cuenta_corriente", titulo: "Cuenta corriente", desc: "Queda a fiado con el proveedor" },
+              ],
+            },
+          ]);
           pendingFacturas.set(soloDigitos(from), { datos: datosFactura, creadaEn: Date.now() });
         } else {
           await sendWhatsappText(from, "No pude leer bien esa factura 😕 ¿Podés mandarla de nuevo, más clara o mejor iluminada?");
@@ -2431,6 +2458,12 @@ async function downloadWhatsappMedia(mediaId) {
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
   });
   const meta = await metaRes.json();
+  if (!meta.url) {
+    // Causa más común: el WHATSAPP_TOKEN venció (los temporales de Meta duran 24hs) o no
+    // tiene permiso sobre este número — hay que generar uno nuevo y actualizar la variable.
+    console.error("No se pudo obtener la URL del archivo de WhatsApp. Respuesta de Meta:", JSON.stringify(meta));
+    throw new Error("WhatsApp no devolvió la URL del archivo — revisar si WHATSAPP_TOKEN venció o es inválido");
+  }
   const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   return { base64: buffer.toString("base64"), mimeType: meta.mime_type };
@@ -2618,6 +2651,91 @@ async function sendWhatsappText(to, body) {
     return true;
   } catch (err) {
     console.error("ERROR de red al enviar mensaje por WhatsApp:", err.message);
+    return false;
+  }
+}
+
+// Manda hasta 3 botones de respuesta rápida (WhatsApp no permite más de 3 en este formato —
+// para más opciones usar sendWhatsappList). Cada botón: {id, titulo} — "titulo" hasta 20
+// caracteres, si no WhatsApp lo rechaza. Cuando el cliente toca uno, llega al webhook como
+// message.type "interactive" — el código ya lo convierte a texto normal antes de procesar,
+// así que el resto del bot no necesita saber que vino de un botón.
+async function sendWhatsappButtons(to, bodyText, botones) {
+  const destino = normalizarParaEnvioAR(to);
+  const botonesRecortados = botones.slice(0, 3).map((b) => ({
+    type: "reply",
+    reply: { id: b.id, title: (b.titulo || "").slice(0, 20) },
+  }));
+  console.log(`Enviando botones a ${destino}: ${botonesRecortados.map((b) => b.reply.title).join(" | ")}`);
+  try {
+    const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: destino,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text: bodyText },
+          action: { buttons: botonesRecortados },
+        },
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("ERROR al enviar botones por WhatsApp:", JSON.stringify(data));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("ERROR de red al enviar botones por WhatsApp:", err.message);
+    return false;
+  }
+}
+
+// Manda una lista desplegable (hasta 10 opciones, más flexible que los botones cuando hay
+// más de 3 alternativas). "secciones" es un array de {titulo, filas: [{id, titulo, desc}]}.
+async function sendWhatsappList(to, bodyText, textoBoton, secciones) {
+  const destino = normalizarParaEnvioAR(to);
+  const seccionesFormateadas = secciones.map((s) => ({
+    title: (s.titulo || "").slice(0, 24),
+    rows: s.filas.slice(0, 10).map((f) => ({
+      id: f.id,
+      title: (f.titulo || "").slice(0, 24),
+      description: (f.desc || "").slice(0, 72),
+    })),
+  }));
+  console.log(`Enviando lista a ${destino}: ${seccionesFormateadas.map((s) => s.rows.length).join("+")} opción(es)`);
+  try {
+    const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: destino,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: { text: bodyText },
+          action: { button: (textoBoton || "Elegir").slice(0, 20), sections: seccionesFormateadas },
+        },
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("ERROR al enviar lista por WhatsApp:", JSON.stringify(data));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("ERROR de red al enviar lista por WhatsApp:", err.message);
     return false;
   }
 }
@@ -4468,6 +4586,30 @@ function normalizarTelefonosEnConfig(obj) {
 }
 
 app.get("/admin/config", requireAdminPage, (_req, res) => {
+  if (ES_STAGING === "true") {
+    // Solo en staging: un banner arriba de todo con un botón para traer la config real.
+    const bannerStaging = `
+      <div style="max-width:700px;margin:16px auto 0;padding:14px 16px;background:#fff3cd;border:1px solid #ffe08a;border-radius:10px;font-size:13.5px;">
+        🧪 <b>Entorno de STAGING.</b> ¿Config vacía o desactualizada?
+        <button id="btnImportarConfig" style="margin-left:8px;padding:6px 12px;font-size:13px;">Traer configuración real</button>
+        <span id="msgImportarConfig" style="margin-left:8px;"></span>
+      </div>
+      <script>
+        document.getElementById("btnImportarConfig").addEventListener("click", function(){
+          var btn = this;
+          btn.disabled = true; btn.textContent = "Importando...";
+          fetch("/admin/importar-config-desde-produccion", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              if (data.error) { document.getElementById("msgImportarConfig").textContent = "❌ " + data.error; btn.disabled = false; btn.textContent = "Traer configuración real"; return; }
+              document.getElementById("msgImportarConfig").textContent = "✅ Listo, recargando...";
+              setTimeout(function(){ window.location.reload(); }, 1200);
+            })
+            .catch(function(e){ document.getElementById("msgImportarConfig").textContent = "❌ " + e.message; btn.disabled = false; btn.textContent = "Traer configuración real"; });
+        });
+      </script>`;
+    return res.type("html").send(ADMIN_CONFIG_PAGE.replace("<body>", "<body>" + bannerStaging));
+  }
   res.type("html").send(ADMIN_CONFIG_PAGE);
 });
 
@@ -4488,6 +4630,52 @@ app.post("/admin/config-save", requireAdminApi, (req, res) => {
   } catch (err) {
     console.error("Error al guardar config:", err);
     res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+// Trae una copia de la configuración REAL (producción) y la pisa acá — solo pensado para
+// arrancar un ambiente de staging con datos de partida (equipo, horarios, menú, etc.) en vez
+// de un config.json vacío. SALVAGUARDA: solo funciona si este entorno tiene la variable
+// ES_STAGING=true cargada — nunca puede correr por error en producción, porque ahí esa
+// variable no existe.
+const CHAPARRITA_URL_PRODUCCION = "https://chaparrita-backend-production.up.railway.app";
+
+app.post("/admin/importar-config-desde-produccion", requireAdminApi, async (req, res) => {
+  if (ES_STAGING !== "true") {
+    return res.status(403).json({ error: "Esto solo está habilitado en staging (falta la variable ES_STAGING en este entorno)." });
+  }
+  try {
+    if (!ADMIN_PASSWORD) {
+      return res.status(500).json({ error: "Falta ADMIN_PASSWORD en este entorno" });
+    }
+    const loginRes = await fetch(`${CHAPARRITA_URL_PRODUCCION}/admin/login-check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+    });
+    if (!loginRes.ok) {
+      return res.status(502).json({ error: "No se pudo iniciar sesión en el backend real — revisar que ADMIN_PASSWORD sea igual en los dos entornos" });
+    }
+    const cookie = loginRes.headers.get("set-cookie");
+    if (!cookie) {
+      return res.status(502).json({ error: "El backend real no devolvió cookie de sesión" });
+    }
+
+    const configRes = await fetch(`${CHAPARRITA_URL_PRODUCCION}/admin/config-data`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({}),
+    });
+    if (!configRes.ok) {
+      return res.status(502).json({ error: "No se pudo traer la configuración del backend real" });
+    }
+    const configReal = await configRes.json();
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(configReal, null, 2), "utf8");
+    console.log("Configuración importada desde producción a este entorno de staging.");
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error importando configuración desde producción:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -5442,12 +5630,7 @@ function construirResumenFactura(datos) {
   });
   if (datos.total) texto += `\n*Total: $${datos.total}*\n`;
   if (datos.advertencia) texto += `\n⚠️ ${datos.advertencia}\n`;
-  texto += `\n¿Está bien así? Contestame con cómo se pagó para cargarla en FUDO:\n`;
-  texto += `• "efectivo caja" (sale de la caja física de Chaparrita)\n`;
-  texto += `• "efectivo reserva" (sale de tu reserva personal)\n`;
-  texto += `• "mercadopago"\n`;
-  texto += `• "cuenta corriente" (queda a fiado con el proveedor)\n`;
-  texto += `\nO contame qué corregir si algo está mal.`;
+  texto += `\n¿Está bien así? Elegí abajo cómo se pagó para cargarla en FUDO, o escribime qué corregir si algo está mal.`;
   return texto;
 }
 
