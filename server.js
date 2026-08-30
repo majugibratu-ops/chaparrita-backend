@@ -3,6 +3,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
+const AdmZip = require("adm-zip");
 const pdfParse = require("pdf-parse");
 const { buildSystemPrompt } = require("./systemPrompt");
 
@@ -188,6 +189,21 @@ function loadSueldos() {
 }
 function saveSueldos(lista) {
   fs.writeFileSync(SUELDOS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
+// ---- Lista fija de empleados para sueldos/adelantos (nombre completo + tipo de cálculo).
+//      Evita que un mismo empleado quede duplicado por escribir el nombre distinto cada vez
+//      (ej: "Mariano" un mes y "Mariano Coceres" otro mes). ----
+const EMPLEADOS_PATH = path.join(DATA_DIR, "empleados.json");
+function loadEmpleados() {
+  try {
+    return JSON.parse(fs.readFileSync(EMPLEADOS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveEmpleados(lista) {
+  fs.writeFileSync(EMPLEADOS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
@@ -3892,6 +3908,83 @@ app.post("/admin/compras-agregar", requireAdminApi, (req, res) => {
 });
 
 // ==================== Panel de facturas de proveedores (mientras no hay API de FUDO) ====================
+// Lista de empleados — dos endpoints separados a propósito:
+// - "empleados-nombres": solo nombre + tipo, sin datos personales. Alcanza con la
+//   contraseña general — lo usa /admin/adelantos para su desplegable.
+// - "empleados-data": ficha completa (CUIT, DNI, dirección, teléfono). Datos personales
+//   sensibles, así que pide las DOS contraseñas — solo se usa dentro de /admin/sueldos.
+app.post("/admin/empleados-nombres", requireAdminApi, (_req, res) => {
+  res.json(loadEmpleados().map((e) => ({ id: e.id, nombre: e.nombre, tipo: e.tipo })));
+});
+
+app.post("/admin/empleados-data", requireAdminApi, requireSueldosApi, (_req, res) => {
+  res.json(loadEmpleados());
+});
+
+app.post("/admin/empleados-agregar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { nombre, tipo, cuit, dni, direccion, telefono } = req.body;
+    if (!nombre || !["normal", "mariano"].includes(tipo)) {
+      return res.status(400).json({ error: "Falta el nombre o el tipo no es válido" });
+    }
+    const lista = loadEmpleados();
+    if (lista.some((e) => e.nombre.toLowerCase() === String(nombre).trim().toLowerCase())) {
+      return res.status(400).json({ error: "Ya existe un empleado con ese nombre" });
+    }
+    lista.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      nombre: String(nombre).trim(),
+      tipo,
+      cuit: cuit ? String(cuit).trim() : "",
+      dni: dni ? String(dni).trim() : "",
+      direccion: direccion ? String(direccion).trim() : "",
+      telefono: telefono ? normalizarTelefonoArgentino(telefono) : "",
+    });
+    saveEmpleados(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error agregando empleado:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/empleados-editar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { id, nombre, tipo, cuit, dni, direccion, telefono } = req.body;
+    if (!id || !nombre || !["normal", "mariano"].includes(tipo)) {
+      return res.status(400).json({ error: "Falta el id, el nombre, o el tipo no es válido" });
+    }
+    const lista = loadEmpleados();
+    const empleado = lista.find((e) => e.id === id);
+    if (!empleado) return res.status(404).json({ error: "Empleado no encontrado" });
+    if (lista.some((e) => e.id !== id && e.nombre.toLowerCase() === String(nombre).trim().toLowerCase())) {
+      return res.status(400).json({ error: "Ya existe otro empleado con ese nombre" });
+    }
+    empleado.nombre = String(nombre).trim();
+    empleado.tipo = tipo;
+    empleado.cuit = cuit ? String(cuit).trim() : "";
+    empleado.dni = dni ? String(dni).trim() : "";
+    empleado.direccion = direccion ? String(direccion).trim() : "";
+    empleado.telefono = telefono ? normalizarTelefonoArgentino(telefono) : "";
+    saveEmpleados(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error editando empleado:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/empleados-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { id } = req.body;
+    saveEmpleados(loadEmpleados().filter((e) => e.id !== id));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error borrando empleado:", err);
+    res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
 app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -3913,10 +4006,24 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '<h1>🧾 Sueldos mensuales</h1>',
     '<p class="sub">Cargá el sueldo de cada mes tal como figura en el recibo. Para Mariano, la app aplica su regla especial de cálculo automáticamente.</p>',
 
+    '<h2>Empleados</h2>',
+    '<p class="sub" style="margin-top:-6px">Dados de alta una sola vez acá, para no duplicar a nadie por escribir el nombre distinto cada mes.</p>',
+    '<div id="listaEmpleadosBox" style="margin-bottom:14px"></div>',
+    '<div class="form-sueldo" style="max-width:420px;margin-bottom:24px">',
+    '<div><label>Nombre completo</label><input id="nEmpleado" type="text" placeholder="Nombre y apellido"></div>',
+    '<div><label>Tipo</label><select id="nTipo"><option value="normal">Normal</option><option value="mariano">Mariano (regla especial)</option></select></div>',
+    '<div><label>CUIT</label><input id="nCuit" type="text" placeholder="20-12345678-9"></div>',
+    '<div><label>DNI</label><input id="nDni" type="text" placeholder="12345678"></div>',
+    '<div><label>Dirección</label><input id="nDireccion" type="text" placeholder="Calle, número, barrio"></div>',
+    '<div><label>Teléfono</label><input id="nTelefono" type="text" placeholder="+54 9 370 5263752"></div>',
+    '<button id="btnAddEmpleado">Guardar empleado</button>',
+    '<button id="btnCancelarEdicion" class="secundario" style="display:none">Cancelar edición</button>',
+    '<div id="msgEmpleado" style="font-size:13px"></div>',
+    '</div>',
+
     '<h2>Cargar sueldo del mes</h2>',
     '<div class="form-sueldo">',
-    '<div><label>Empleado</label><input id="fEmpleado" type="text" list="listaEmpleadosSueldo" placeholder="Nombre del empleado"></div>',
-    '<datalist id="listaEmpleadosSueldo"></datalist>',
+    '<div><label>Empleado</label><select id="fEmpleado"><option value="">Elegí un empleado...</option></select></div>',
     '<div><label>Mes</label><input id="fMes" type="month"></div>',
     '<div><label>Tipo</label><select id="fTipo"><option value="normal">Normal (un solo recibo)</option><option value="mariano">Mariano (regla especial)</option></select></div>',
     '<div id="campoNormal"><label>Monto del recibo (tal como figura)</label><input id="fMontoRecibo" type="number" step="any" placeholder="$"></div>',
@@ -3934,7 +4041,7 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '<div id="resumen">Cargando...</div>',
 
     '<script>',
-    'var SUELDOS = []; var ADELANTOS = [];',
+    'var SUELDOS = []; var ADELANTOS = []; var EMPLEADOS = [];',
     'function hoyMes(){ var d=new Date(); return d.toISOString().slice(0,7); }',
     'document.getElementById("fMes").value = hoyMes();',
     '',
@@ -3942,6 +4049,103 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '  var partes = mesISO.split("-"); var meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];',
     '  return meses[parseInt(partes[1],10)-1] + " " + partes[0];',
     '}',
+    '',
+    'function cargarEmpleados(){',
+    '  return fetch("/admin/empleados-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      EMPLEADOS = data;',
+    '      pintarListaEmpleados();',
+    '      pintarSelectEmpleado();',
+    '    });',
+    '}',
+    'var editandoId = null;',
+    'function pintarListaEmpleados(){',
+    '  var box = document.getElementById("listaEmpleadosBox");',
+    '  box.innerHTML = "";',
+    '  EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '    var div = document.createElement("div");',
+    '    div.className = "card"; div.style.padding = "10px 14px"; div.style.marginBottom = "8px";',
+    '    div.innerHTML = "<b>" + e.nombre + "</b> <span style=\\"color:var(--texto-tenue);font-size:12.5px\\">(" + (e.tipo === "mariano" ? "regla especial" : "normal") + ")</span>" +',
+    '      "<div style=\\"font-size:12.5px;color:var(--texto-tenue);margin-top:3px\\">" +',
+    '      (e.cuit ? "CUIT: " + e.cuit + " · " : "") + (e.dni ? "DNI: " + e.dni + " · " : "") + (e.telefono ? "Tel: " + e.telefono : "") +',
+    '      (e.direccion ? "<br>" + e.direccion : "") + "</div>";',
+    '    var btnEditar = document.createElement("button"); btnEditar.textContent = "Editar"; btnEditar.className = "secundario"; btnEditar.style.fontSize = "12px";',
+    '    btnEditar.addEventListener("click", function(){ cargarEnFormulario(e); });',
+    '    var btnDel = document.createElement("button");',
+    '    btnDel.textContent = "✕ Sacar"; btnDel.className = "btn-danger"; btnDel.style.fontSize = "12px"; btnDel.style.marginLeft = "6px";',
+    '    btnDel.addEventListener("click", function(){',
+    '      if (!confirm("¿Sacar a " + e.nombre + " de la lista de empleados? (no borra los sueldos/adelantos ya cargados)")) return;',
+    '      fetch("/admin/empleados-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: e.id})})',
+    '        .then(function(r){ return r.json(); }).then(cargarEmpleados);',
+    '    });',
+    '    div.appendChild(btnEditar); div.appendChild(btnDel);',
+    '    box.appendChild(div);',
+    '  });',
+    '}',
+    'function cargarEnFormulario(e){',
+    '  editandoId = e.id;',
+    '  document.getElementById("nEmpleado").value = e.nombre;',
+    '  document.getElementById("nTipo").value = e.tipo;',
+    '  document.getElementById("nCuit").value = e.cuit || "";',
+    '  document.getElementById("nDni").value = e.dni || "";',
+    '  document.getElementById("nDireccion").value = e.direccion || "";',
+    '  document.getElementById("nTelefono").value = e.telefono || "";',
+    '  document.getElementById("btnAddEmpleado").textContent = "Guardar cambios";',
+    '  document.getElementById("btnCancelarEdicion").style.display = "inline-block";',
+    '  document.getElementById("nEmpleado").scrollIntoView({behavior:"smooth", block:"center"});',
+    '}',
+    'function limpiarFormularioEmpleado(){',
+    '  editandoId = null;',
+    '  document.getElementById("nEmpleado").value = "";',
+    '  document.getElementById("nCuit").value = "";',
+    '  document.getElementById("nDni").value = "";',
+    '  document.getElementById("nDireccion").value = "";',
+    '  document.getElementById("nTelefono").value = "";',
+    '  document.getElementById("nTipo").value = "normal";',
+    '  document.getElementById("btnAddEmpleado").textContent = "Guardar empleado";',
+    '  document.getElementById("btnCancelarEdicion").style.display = "none";',
+    '}',
+    'document.getElementById("btnCancelarEdicion").addEventListener("click", limpiarFormularioEmpleado);',
+    'function pintarSelectEmpleado(){',
+    '  var select = document.getElementById("fEmpleado");',
+    '  var valorActual = select.value;',
+    '  select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
+    '  EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '    var opt = document.createElement("option"); opt.value = e.nombre; opt.dataset.tipo = e.tipo; opt.textContent = e.nombre;',
+    '    select.appendChild(opt);',
+    '  });',
+    '  select.value = valorActual;',
+    '}',
+    'document.getElementById("btnAddEmpleado").addEventListener("click", function(){',
+    '  var nombre = document.getElementById("nEmpleado").value.trim();',
+    '  var tipo = document.getElementById("nTipo").value;',
+    '  var cuit = document.getElementById("nCuit").value.trim();',
+    '  var dni = document.getElementById("nDni").value.trim();',
+    '  var direccion = document.getElementById("nDireccion").value.trim();',
+    '  var telefono = document.getElementById("nTelefono").value.trim();',
+    '  var msg = document.getElementById("msgEmpleado");',
+    '  if (!nombre) { msg.textContent = "Falta el nombre."; return; }',
+    '  var body = { nombre: nombre, tipo: tipo, cuit: cuit, dni: dni, direccion: direccion, telefono: telefono };',
+    '  var url = "/admin/empleados-agregar";',
+    '  if (editandoId) { body.id = editandoId; url = "/admin/empleados-editar"; }',
+    '  fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = data.error; return; }',
+    '      msg.textContent = "";',
+    '      limpiarFormularioEmpleado();',
+    '      cargarEmpleados();',
+    '    });',
+    '});',
+    '// Al elegir un empleado ya cargado, auto-selecciona su tipo (Mariano vs normal).',
+    'document.getElementById("fEmpleado").addEventListener("change", function(){',
+    '  var opt = this.options[this.selectedIndex];',
+    '  if (opt && opt.dataset.tipo) {',
+    '    document.getElementById("fTipo").value = opt.dataset.tipo;',
+    '    document.getElementById("fTipo").dispatchEvent(new Event("change"));',
+    '  }',
+    '});',
     '',
     'document.getElementById("fTipo").addEventListener("change", function(){',
     '  var esMariano = this.value === "mariano";',
@@ -3975,12 +4179,6 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '  select.value = mesActual;',
     '}',
     '',
-    'function pintarDatalist(){',
-    '  var dl = document.getElementById("listaEmpleadosSueldo");',
-    '  dl.innerHTML = "";',
-    '  var nombres = Array.from(new Set(SUELDOS.map(function(s){ return s.empleado; }).concat(ADELANTOS.map(function(a){ return a.empleado; })))).sort();',
-    '  nombres.forEach(function(n){ var opt = document.createElement("option"); opt.value = n; dl.appendChild(opt); });',
-    '}',
     '',
     'function pintarResumen(){',
     '  var mesElegido = document.getElementById("filtroMes").value;',
@@ -4019,10 +4217,11 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     'function cargarTodo(){',
     '  Promise.all([',
     '    fetch("/admin/sueldos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); }),',
-    '    fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); })',
+    '    fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); }),',
+    '    cargarEmpleados()',
     '  ]).then(function(res){',
     '    SUELDOS = res[0]; ADELANTOS = res[1];',
-    '    pintarFiltroMes(); pintarDatalist(); pintarResumen();',
+    '    pintarFiltroMes(); pintarResumen();',
     '  }).catch(function(e){ document.getElementById("resumen").textContent = "Error: " + e.message; });',
     '}',
     'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
@@ -4135,8 +4334,7 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
 
     '<h2>Cargar un adelanto</h2>',
     '<div class="form-adelanto">',
-    '<div><label>Empleado</label><input id="fEmpleado" type="text" list="listaEmpleados" placeholder="Nombre del empleado"></div>',
-    '<datalist id="listaEmpleados"></datalist>',
+    '<div><label>Empleado</label><select id="fEmpleado"><option value="">Elegí un empleado...</option></select></div>',
     '<div><label>Fecha</label><input id="fFecha" type="date"></div>',
     '<div><label>Monto</label><input id="fMonto" type="number" step="any" placeholder="$"></div>',
     '<div><label>Medio</label><select id="fMedio"><option value="efectivo">Efectivo</option><option value="mercadopago">Mercadopago</option></select></div>',
@@ -4145,12 +4343,29 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '<div id="msgForm" style="font-size:13px"></div>',
     '</div>',
 
+    '<h2>Detectar adelantos automáticamente</h2>',
+    '<p class="sub" style="margin-top:-6px">Pegá una conversación de WhatsApp exportada, o subí capturas de transferencias — Claude te propone los adelantos que encuentre, y vos elegís cuáles guardar. No se guarda nada solo.</p>',
+    '<div class="form-adelanto" style="max-width:520px">',
+    '<div><label>Empleado al que corresponden estos adelantos</label><select id="dEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Subir el .zip o .txt que exportó WhatsApp (Menú del chat → Más → Exportar chat)</label><input id="dArchivo" type="file" accept=".zip,.txt"></div>',
+    '<div style="text-align:center;color:var(--texto-tenue);font-size:12px">— o —</div>',
+    '<div><label>Pegar el texto directamente</label><textarea id="dTexto" rows="5" placeholder="Pegá acá los mensajes relevantes"></textarea></div>',
+    '<button id="btnDetectarChat" class="secundario">Analizar chat</button>',
+    '<div><label>O subir capturas de transferencias (opcional, podés elegir varias)</label><input id="dCapturas" type="file" accept="image/*" multiple></div>',
+    '<button id="btnDetectarCapturas" class="secundario">Analizar capturas</button>',
+    '<div id="msgDetectar" style="font-size:13px"></div>',
+    '</div>',
+    '<div id="candidatosBox" style="display:none;margin-bottom:28px">',
+    '<table class="tabla-adelantos"><thead><tr><th></th><th>Fecha</th><th>Monto</th><th>Medio</th><th>Nota / origen</th></tr></thead><tbody id="tbodyCandidatos"></tbody></table>',
+    '<button id="btnGuardarCandidatos">Guardar seleccionados</button>',
+    '</div>',
+
     '<h2>Resumen por empleado</h2>',
     '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
     '<div id="resumen">Cargando...</div>',
 
     '<script>',
-    'var TODOS = [];',
+    'var TODOS = []; var EMPLEADOS = [];',
     'function hoyISO(){ var d=new Date(); return d.toISOString().slice(0,10); }',
     'document.getElementById("fFecha").value = hoyISO();',
     '',
@@ -4173,11 +4388,17 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '  select.value = mesActual;',
     '}',
     '',
-    'function pintarDatalistEmpleados(){',
-    '  var dl = document.getElementById("listaEmpleados");',
-    '  dl.innerHTML = "";',
-    '  var nombres = Array.from(new Set(TODOS.map(function(a){ return a.empleado; }))).sort();',
-    '  nombres.forEach(function(n){ var opt = document.createElement("option"); opt.value = n; dl.appendChild(opt); });',
+    'function pintarSelectEmpleado(){',
+    '  ["fEmpleado", "dEmpleado"].forEach(function(idSelect){',
+    '    var select = document.getElementById(idSelect);',
+    '    var valorActual = select.value;',
+    '    select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
+    '    EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '      var opt = document.createElement("option"); opt.value = e.nombre; opt.textContent = e.nombre;',
+    '      select.appendChild(opt);',
+    '    });',
+    '    select.value = valorActual;',
+    '  });',
     '}',
     '',
     'function pintarResumen(){',
@@ -4230,12 +4451,13 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '}',
     '',
     'function cargarTodo(){',
-    '  fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
-    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
-    '    .then(function(data){',
-    '      TODOS = data;',
+    '  Promise.all([',
+    '    fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); }),',
+    '    fetch("/admin/empleados-nombres", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); })',
+    '  ]).then(function(res){',
+    '      TODOS = res[0]; EMPLEADOS = res[1];',
     '      pintarFiltroMes();',
-    '      pintarDatalistEmpleados();',
+    '      pintarSelectEmpleado();',
     '      pintarResumen();',
     '    })',
     '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("resumen").textContent = "Error: " + e.message; } });',
@@ -4260,6 +4482,105 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '    })',
     '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
     '});',
+    '',
+    '// ---- Detección automática (chat / capturas) ----',
+    'function pintarCandidatos(candidatos){',
+    '  var tbody = document.getElementById("tbodyCandidatos");',
+    '  tbody.innerHTML = "";',
+    '  if (candidatos.length === 0) {',
+    '    document.getElementById("msgDetectar").textContent = "No se encontró ningún adelanto reconocible.";',
+    '    document.getElementById("candidatosBox").style.display = "none";',
+    '    return;',
+    '  }',
+    '  candidatos.forEach(function(c){',
+    '    var tr = document.createElement("tr");',
+    '    var tdCheck = document.createElement("td");',
+    '    var chk = document.createElement("input"); chk.type = "checkbox"; chk.checked = true; chk.style.marginTop = "0";',
+    '    tdCheck.appendChild(chk);',
+    '    var tdFecha = document.createElement("td");',
+    '    var inpFecha = document.createElement("input"); inpFecha.type = "date"; inpFecha.value = c.fecha || hoyISO(); inpFecha.style.marginTop = "0"; inpFecha.style.padding = "4px";',
+    '    tdFecha.appendChild(inpFecha);',
+    '    var tdMonto = document.createElement("td");',
+    '    var inpMonto = document.createElement("input"); inpMonto.type = "number"; inpMonto.value = c.monto || ""; inpMonto.style.marginTop = "0"; inpMonto.style.width = "90px"; inpMonto.style.padding = "4px";',
+    '    tdMonto.appendChild(inpMonto);',
+    '    var tdMedio = document.createElement("td");',
+    '    var selMedio = document.createElement("select"); selMedio.style.marginTop = "0"; selMedio.style.padding = "4px";',
+    '    ["efectivo","mercadopago"].forEach(function(m){ var opt = document.createElement("option"); opt.value = m; opt.textContent = m === "efectivo" ? "Efectivo" : "Mercadopago"; if ((c.medioPago||"").indexOf(m) === 0 || (m === "mercadopago" && (c.medioPago||"").indexOf("mercado") === 0)) opt.selected = true; selMedio.appendChild(opt); });',
+    '    tdMedio.appendChild(selMedio);',
+    '    var tdNota = document.createElement("td");',
+    '    tdNota.style.fontSize = "11.5px"; tdNota.style.color = "var(--texto-tenue)";',
+    '    tdNota.textContent = c.nota || c.advertencia || (c.destinatario ? ("Para: " + c.destinatario) : "");',
+    '    tr.appendChild(tdCheck); tr.appendChild(tdFecha); tr.appendChild(tdMonto); tr.appendChild(tdMedio); tr.appendChild(tdNota);',
+    '    tr._candidato = { chk: chk, fecha: inpFecha, monto: inpMonto, medio: selMedio, nota: c.nota || c.advertencia || "" };',
+    '    tbody.appendChild(tr);',
+    '  });',
+    '  document.getElementById("candidatosBox").style.display = "block";',
+    '  document.getElementById("candidatosBox").scrollIntoView({behavior:"smooth", block:"center"});',
+    '}',
+    'document.getElementById("btnDetectarChat").addEventListener("click", function(){',
+    '  var texto = document.getElementById("dTexto").value;',
+    '  var archivo = document.getElementById("dArchivo").files[0];',
+    '  var msg = document.getElementById("msgDetectar");',
+    '  if (!texto.trim() && !archivo) { msg.textContent = "Pegá el texto, o subí el .zip/.txt exportado."; return; }',
+    '  msg.textContent = "Analizando con Claude...";',
+    '  var opciones;',
+    '  if (archivo) {',
+    '    var fd = new FormData();',
+    '    fd.append("archivoChat", archivo);',
+    '    if (texto.trim()) fd.append("texto", texto);',
+    '    opciones = { method: "POST", body: fd };',
+    '  } else {',
+    '    opciones = { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({texto: texto}) };',
+    '  }',
+    '  fetch("/admin/adelantos-detectar-chat", opciones)',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = data.candidatos.length + " candidato(s) encontrado(s). Revisá y confirmá abajo.";',
+    '      pintarCandidatos(data.candidatos);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnDetectarCapturas").addEventListener("click", function(){',
+    '  var input = document.getElementById("dCapturas");',
+    '  var msg = document.getElementById("msgDetectar");',
+    '  if (!input.files || input.files.length === 0) { msg.textContent = "Elegí al menos una captura primero."; return; }',
+    '  var fd = new FormData();',
+    '  for (var i = 0; i < input.files.length; i++) fd.append("capturas", input.files[i]);',
+    '  msg.textContent = "Leyendo capturas con Claude...";',
+    '  fetch("/admin/adelantos-detectar-captura", {method:"POST", body: fd})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = data.candidatos.length + " captura(s) leída(s). Revisá y confirmá abajo.";',
+    '      pintarCandidatos(data.candidatos);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnGuardarCandidatos").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("dEmpleado").value;',
+    '  var msg = document.getElementById("msgDetectar");',
+    '  if (!empleado) { msg.textContent = "Elegí a qué empleado corresponden estos adelantos, arriba."; return; }',
+    '  var items = [];',
+    '  document.querySelectorAll("#tbodyCandidatos tr").forEach(function(tr){',
+    '    var c = tr._candidato;',
+    '    if (!c.chk.checked) return;',
+    '    items.push({ empleado: empleado, fecha: c.fecha.value, monto: parseFloat(c.monto.value), medioPago: c.medio.value, nota: c.nota });',
+    '  });',
+    '  if (items.length === 0) { msg.textContent = "No dejaste ningún candidato tildado."; return; }',
+    '  fetch("/admin/adelantos-detectar-guardar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({items: items})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = "✅ Se guardaron " + data.agregados + " adelanto(s).";',
+    '      document.getElementById("candidatosBox").style.display = "none";',
+    '      document.getElementById("dTexto").value = "";',
+    '      document.getElementById("dCapturas").value = "";',
+    '      cargarTodo();',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
     'cargarTodo();',
     '</' + 'script>',
     '</div>',
@@ -4325,6 +4646,152 @@ app.post("/admin/adelantos-saldar", requireAdminApi, (req, res) => {
   } catch (err) {
     console.error("Error saldando adelantos:", err);
     res.status(500).json({ error: "No se pudo actualizar" });
+  }
+});
+
+// ---- Detección asistida de adelantos: a partir de texto de chat (export de WhatsApp,
+//      pegado tal cual) o de capturas de transferencias. En los dos casos Claude devuelve
+//      CANDIDATOS — nada se guarda como adelanto real hasta que el usuario los revise y
+//      confirme desde /admin/adelantos-detectar-guardar. ----
+const DETECTAR_ADELANTOS_CHAT_PROMPT = `Sos un asistente que revisa una conversación de WhatsApp exportada entre el dueño de un restaurante y un empleado, buscando menciones de ADELANTOS DE SUELDO (plata que el dueño le adelantó al empleado, en efectivo o por Mercadopago/transferencia).
+
+Buscá frases como "te mando $X", "te adelanto", "te presto", "te transferí", "toma $X", con un monto en pesos y (si se puede inferir) una fecha. NO cuentes cosas que no sean claramente un adelanto de plata (charlas normales, pedidos de mercadería, pagos a proveedores, etc. no cuentan).
+
+Para cada adelanto que encuentres, indicá si por el contexto del mensaje parece haber sido en efectivo o por Mercadopago/transferencia (si no está claro, usá "efectivo" como valor por defecto, pero avisá la incertidumbre en la nota).
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"candidatos": [{"fecha": "YYYY-MM-DD si se puede inferir, si no dejar vacío", "monto": 5000, "medioPago": "efectivo o mercadopago", "nota": "fragmento o resumen breve del mensaje que lo justifica"}]}`;
+
+const DETECTAR_ADELANTOS_CAPTURA_PROMPT = `Sos un asistente que lee una captura de pantalla de una transferencia (de Mercadopago, de un banco, o similar) para registrar un adelanto de sueldo a un empleado. Extraé los datos reales que se vean, sin inventar nada.
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"fecha": "YYYY-MM-DD si se ve", "monto": 5000, "destinatario": "nombre del destinatario tal como figura, si se ve", "medioPago": "mercadopago", "advertencia": "si algo no se ve claro, contalo acá; si no, dejalo vacío"}`;
+
+app.post("/admin/adelantos-detectar-chat", requireAdminApi, upload.single("archivoChat"), async (req, res) => {
+  try {
+    let texto = req.body.texto || "";
+    // Si vino un archivo (en vez de, o además de, texto pegado): puede ser un .zip (lo que
+    // exporta WhatsApp normalmente, con el .txt del chat adentro — a veces también fotos,
+    // que ignoramos) o directamente un .txt.
+    if (req.file) {
+      if (req.file.originalname.toLowerCase().endsWith(".zip") || req.file.mimetype === "application/zip") {
+        const zip = new AdmZip(req.file.buffer);
+        const entradaTxt = zip.getEntries().find((e) => e.entryName.toLowerCase().endsWith(".txt"));
+        if (!entradaTxt) {
+          return res.status(400).json({ error: "El .zip no tiene ningún archivo .txt adentro — ¿es realmente la exportación del chat?" });
+        }
+        texto = entradaTxt.getData().toString("utf8");
+      } else {
+        texto = req.file.buffer.toString("utf8");
+      }
+    }
+    if (!texto || !texto.trim()) return res.status(400).json({ error: "Falta el texto del chat (pegalo, o subí el .zip/.txt exportado)" });
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 3000,
+        system: DETECTAR_ADELANTOS_CHAT_PROMPT,
+        messages: [{ role: "user", content: texto.slice(0, 60000) }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al detectar adelantos en chat:", data);
+      return res.status(502).json({ error: "Error consultando a Claude" });
+    }
+    const textoRespuesta = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n").trim();
+    const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.json({ candidatos: [] });
+    const parsed = JSON.parse(jsonMatch[0]);
+    res.json({ candidatos: Array.isArray(parsed.candidatos) ? parsed.candidatos : [] });
+  } catch (err) {
+    console.error("Error detectando adelantos en chat:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/adelantos-detectar-captura", requireAdminApi, upload.array("capturas", 10), async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: "No se recibió ninguna captura" });
+    const candidatos = [];
+    for (const file of req.files) {
+      if (!file.mimetype.startsWith("image/")) continue;
+      const base64 = file.buffer.toString("base64");
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 800,
+          system: DETECTAR_ADELANTOS_CAPTURA_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image", source: { type: "base64", media_type: file.mimetype, data: base64 } },
+                { type: "text", text: "Extraé los datos de esta transferencia." },
+              ],
+            },
+          ],
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        console.error("Error de la API de Claude al leer captura de transferencia:", data);
+        continue;
+      }
+      const textoRespuesta = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n").trim();
+      const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) continue;
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        candidatos.push(parsed);
+      } catch {
+        continue;
+      }
+    }
+    res.json({ candidatos });
+  } catch (err) {
+    console.error("Error detectando adelantos en capturas:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/adelantos-detectar-guardar", requireAdminApi, (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "No hay nada para guardar" });
+    const lista = loadAdelantos();
+    let agregados = 0;
+    for (const it of items) {
+      if (!it.empleado || !it.fecha || !it.monto || !["efectivo", "mercadopago"].includes(it.medioPago)) continue;
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+        empleado: String(it.empleado).trim(),
+        fecha: it.fecha,
+        monto: Number(it.monto),
+        medioPago: it.medioPago,
+        nota: it.nota ? String(it.nota).trim() : "(detectado automáticamente)",
+        saldado: false,
+        creadoEn: new Date().toISOString(),
+      });
+      agregados++;
+    }
+    saveAdelantos(lista);
+    res.json({ ok: true, agregados });
+  } catch (err) {
+    console.error("Error guardando adelantos detectados:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
   }
 });
 
