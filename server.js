@@ -4036,6 +4036,27 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '<div id="msgForm" style="font-size:13px"></div>',
     '</div>',
 
+    '<h2>Importar varios sueldos de una vez</h2>',
+    '<p class="sub" style="margin-top:-6px">Una línea por mes. Normal: <code>mes|normal|montoRecibo</code>. Mariano: <code>mes|mariano|montoDeclarado|montoBase</code>. Ejemplo: <code>2026-06|normal|508290.47</code></p>',
+    '<div class="form-sueldo" style="max-width:520px">',
+    '<div><label>Empleado</label><select id="miEmpleadoSueldo"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Pegar líneas</label><textarea id="miTextoSueldo" rows="6" placeholder="2026-06|normal|508290.47\n2026-07|normal|799018.52"></textarea></div>',
+    '<button id="btnImportarSueldos">Importar todo</button>',
+    '<div id="msgImportarSueldos" style="font-size:13px;white-space:pre-wrap"></div>',
+    '</div>',
+
+    '<h2>Resumen para mandarle al empleado</h2>',
+    '<p class="sub" style="margin-top:-6px">Arma un texto prolijo con el detalle de sueldo y cada adelanto, listo para copiar y pegar en WhatsApp.</p>',
+    '<div class="form-sueldo" style="max-width:520px">',
+    '<div><label>Empleado</label><select id="rEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Desde (mes)</label><input id="rMesDesde" type="month"></div>',
+    '<div><label>Hasta (mes)</label><input id="rMesHasta" type="month"></div>',
+    '<button id="btnGenerarResumen">Generar resumen</button>',
+    '<textarea id="rResultado" rows="14" style="display:none;font-family:monospace;font-size:12.5px" readonly></textarea>',
+    '<button id="btnCopiarResumen" style="display:none" class="secundario">Copiar texto</button>',
+    '<div id="msgResumen" style="font-size:13px"></div>',
+    '</div>',
+
     '<h2>Resumen por empleado (sueldo − adelantos pendientes)</h2>',
     '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
     '<div id="resumen">Cargando...</div>',
@@ -4108,14 +4129,16 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '}',
     'document.getElementById("btnCancelarEdicion").addEventListener("click", limpiarFormularioEmpleado);',
     'function pintarSelectEmpleado(){',
-    '  var select = document.getElementById("fEmpleado");',
-    '  var valorActual = select.value;',
-    '  select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
-    '  EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
-    '    var opt = document.createElement("option"); opt.value = e.nombre; opt.dataset.tipo = e.tipo; opt.textContent = e.nombre;',
-    '    select.appendChild(opt);',
+    '  ["fEmpleado", "miEmpleadoSueldo", "rEmpleado"].forEach(function(idSelect){',
+    '    var select = document.getElementById(idSelect);',
+    '    var valorActual = select.value;',
+    '    select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
+    '    EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '      var opt = document.createElement("option"); opt.value = e.nombre; opt.dataset.tipo = e.tipo; opt.textContent = e.nombre;',
+    '      select.appendChild(opt);',
+    '    });',
+    '    select.value = valorActual;',
     '  });',
-    '  select.value = valorActual;',
     '}',
     'document.getElementById("btnAddEmpleado").addEventListener("click", function(){',
     '  var nombre = document.getElementById("nEmpleado").value.trim();',
@@ -4250,6 +4273,53 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '    })',
     '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
     '});',
+    '',
+    'document.getElementById("btnImportarSueldos").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("miEmpleadoSueldo").value;',
+    '  var texto = document.getElementById("miTextoSueldo").value;',
+    '  var msg = document.getElementById("msgImportarSueldos");',
+    '  if (!empleado || !texto.trim()) { msg.textContent = "Elegí el empleado y pegá al menos una línea."; return; }',
+    '  fetch("/admin/sueldos-importar-masivo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, texto: texto})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var m = "✅ Se importaron " + data.agregados + " mes(es).";',
+    '      if (data.errores && data.errores.length > 0) { m += "\\n⚠️ Líneas con problema:\\n" + data.errores.join("\\n"); }',
+    '      msg.textContent = m;',
+    '      document.getElementById("miTextoSueldo").value = "";',
+    '      cargarTodo();',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    'document.getElementById("btnGenerarResumen").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("rEmpleado").value;',
+    '  var mesDesde = document.getElementById("rMesDesde").value;',
+    '  var mesHasta = document.getElementById("rMesHasta").value;',
+    '  var msg = document.getElementById("msgResumen");',
+    '  if (!empleado || !mesDesde || !mesHasta) { msg.textContent = "Completá empleado y los dos meses."; return; }',
+    '  fetch("/admin/resumen-empleado", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, mesDesde: mesDesde, mesHasta: mesHasta})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var area = document.getElementById("rResultado");',
+    '      area.value = data.texto;',
+    '      area.style.display = "block";',
+    '      document.getElementById("btnCopiarResumen").style.display = "inline-block";',
+    '      msg.textContent = "";',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnCopiarResumen").addEventListener("click", function(){',
+    '  var area = document.getElementById("rResultado");',
+    '  area.select();',
+    '  navigator.clipboard.writeText(area.value).then(function(){',
+    '    document.getElementById("msgResumen").textContent = "✅ Copiado — ya lo podés pegar en WhatsApp.";',
+    '  }).catch(function(){',
+    '    document.getElementById("msgResumen").textContent = "No se pudo copiar solo, seleccioná el texto a mano.";',
+    '  });',
+    '});',
+    '',
     'cargarTodo();',
     '</' + 'script>',
     '</div>',
@@ -4296,6 +4366,65 @@ app.post("/admin/sueldos-agregar", requireAdminApi, requireSueldosApi, (req, res
   }
 });
 
+// Carga varios sueldos de una sola vez. Formato, una línea por mes:
+// tipo normal:  mes|normal|montoRecibo
+// tipo mariano: mes|mariano|montoDeclarado|montoBase
+// Ejemplo: 2026-06|normal|508290.47
+app.post("/admin/sueldos-importar-masivo", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { empleado, texto } = req.body;
+    if (!empleado || !texto || !texto.trim()) {
+      return res.status(400).json({ error: "Falta el empleado o el texto a importar" });
+    }
+    const lineas = texto.split("\n").map((l) => l.trim()).filter(Boolean);
+    const lista = loadSueldos();
+    let agregados = 0;
+    const errores = [];
+    lineas.forEach((linea, idx) => {
+      const partes = linea.split("|").map((p) => p.trim());
+      const [mes, tipo, a, b] = partes;
+      if (!mes || !["normal", "mariano"].includes(tipo)) {
+        errores.push(`Línea ${idx + 1}: "${linea}" — no se pudo interpretar`);
+        return;
+      }
+      let total, registro;
+      if (tipo === "mariano") {
+        const montoDeclarado = Number(a);
+        const montoBase = Number(b);
+        if (!montoDeclarado || !montoBase) {
+          errores.push(`Línea ${idx + 1}: "${linea}" — faltan los dos montos de Mariano`);
+          return;
+        }
+        total = 2 * montoDeclarado + montoBase;
+        registro = { montoDeclarado, montoBase };
+      } else {
+        const montoRecibo = Number(a);
+        if (!montoRecibo) {
+          errores.push(`Línea ${idx + 1}: "${linea}" — falta el monto del recibo`);
+          return;
+        }
+        total = montoRecibo;
+        registro = { montoRecibo };
+      }
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + idx,
+        empleado: String(empleado).trim(),
+        mes,
+        tipo,
+        ...registro,
+        total,
+        creadoEn: new Date().toISOString(),
+      });
+      agregados++;
+    });
+    saveSueldos(lista);
+    res.json({ ok: true, agregados, errores });
+  } catch (err) {
+    console.error("Error importando sueldos en masa:", err);
+    res.status(500).json({ error: "No se pudo importar" });
+  }
+});
+
 app.post("/admin/sueldos-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
   try {
     const { id } = req.body;
@@ -4305,6 +4434,63 @@ app.post("/admin/sueldos-borrar", requireAdminApi, requireSueldosApi, (req, res)
   } catch (err) {
     console.error("Error borrando sueldo:", err);
     res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
+// Arma un resumen prolijo y transparente de sueldo + adelantos de un empleado, listo para
+// mandarle por WhatsApp — pensado para que el empleado vea el detalle completo (cada
+// adelanto con fecha y medio de pago) y no le queden dudas de cómo se llegó al total.
+app.post("/admin/resumen-empleado", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { empleado, mesDesde, mesHasta } = req.body;
+    if (!empleado || !mesDesde || !mesHasta) {
+      return res.status(400).json({ error: "Falta el empleado o el rango de meses" });
+    }
+    const sueldos = loadSueldos()
+      .filter((s) => s.empleado === empleado && s.mes >= mesDesde && s.mes <= mesHasta)
+      .sort((a, b) => a.mes.localeCompare(b.mes));
+    const adelantos = loadAdelantos()
+      .filter((a) => a.empleado === empleado && a.fecha.slice(0, 7) >= mesDesde && a.fecha.slice(0, 7) <= mesHasta)
+      .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+    const nombreMes = (mesISO) => {
+      const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+      const [y, m] = mesISO.split("-");
+      return `${meses[parseInt(m, 10) - 1]} ${y}`;
+    };
+    const fmt = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    let texto = `📋 *RESUMEN DE SUELDO Y ADELANTOS*\n${empleado}\n`;
+    texto += `Período: ${nombreMes(mesDesde)}${mesDesde !== mesHasta ? ` a ${nombreMes(mesHasta)}` : ""}\n\n`;
+
+    texto += `💰 *SUELDO*\n`;
+    let totalSueldo = 0;
+    sueldos.forEach((s) => {
+      texto += `${nombreMes(s.mes)}: $${fmt(s.total)}\n`;
+      totalSueldo += s.total;
+    });
+    if (sueldos.length === 0) texto += `(sin sueldo cargado en este período)\n`;
+    texto += `*Total sueldo: $${fmt(totalSueldo)}*\n\n`;
+
+    texto += `💵 *ADELANTOS RECIBIDOS*\n`;
+    let totalAdelantos = 0;
+    adelantos.forEach((a) => {
+      const [y, m, d] = a.fecha.split("-");
+      const medio = a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago";
+      texto += `${d}/${m} - $${fmt(a.monto)} (${medio})\n`;
+      totalAdelantos += a.monto;
+    });
+    if (adelantos.length === 0) texto += `(sin adelantos cargados en este período)\n`;
+    texto += `*Total adelantos: $${fmt(totalAdelantos)}*\n\n`;
+
+    const saldo = totalSueldo - totalAdelantos;
+    texto += `✅ *SALDO*\n`;
+    texto += saldo >= 0 ? `A favor del empleado: $${fmt(saldo)}` : `A favor de Chaparrita: $${fmt(Math.abs(saldo))}`;
+
+    res.json({ ok: true, texto, totalSueldo, totalAdelantos, saldo });
+  } catch (err) {
+    console.error("Error armando resumen de empleado:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -4341,6 +4527,15 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '<div><label>Nota (opcional)</label><input id="fNota" type="text" placeholder="ej: adelanto de quincena"></div>',
     '<button id="btnAgregar">Cargar adelanto</button>',
     '<div id="msgForm" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Importar varios adelantos de una vez</h2>',
+    '<p class="sub" style="margin-top:-6px">Una línea por adelanto, formato: <code>fecha|monto|medio|nota</code> (medio: efectivo o mercadopago; nota es opcional). Ejemplo: <code>2026-06-05|61961.11|mercadopago|</code></p>',
+    '<div class="form-adelanto" style="max-width:520px">',
+    '<div><label>Empleado</label><select id="miEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Pegar líneas</label><textarea id="miTexto" rows="8" placeholder="2026-06-05|61961.11|mercadopago|\n2026-07-18|50000|efectivo|"></textarea></div>',
+    '<button id="btnImportarMasivo">Importar todo</button>',
+    '<div id="msgImportarMasivo" style="font-size:13px;white-space:pre-wrap"></div>',
     '</div>',
 
     '<h2>Detectar adelantos automáticamente</h2>',
@@ -4389,7 +4584,7 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '}',
     '',
     'function pintarSelectEmpleado(){',
-    '  ["fEmpleado", "dEmpleado"].forEach(function(idSelect){',
+    '  ["fEmpleado", "dEmpleado", "miEmpleado"].forEach(function(idSelect){',
     '    var select = document.getElementById(idSelect);',
     '    var valorActual = select.value;',
     '    select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
@@ -4479,6 +4674,24 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '      document.getElementById("fNota").value = "";',
     '      cargarTodo();',
     '      setTimeout(function(){ msg.textContent = ""; }, 2000);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    'document.getElementById("btnImportarMasivo").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("miEmpleado").value;',
+    '  var texto = document.getElementById("miTexto").value;',
+    '  var msg = document.getElementById("msgImportarMasivo");',
+    '  if (!empleado || !texto.trim()) { msg.textContent = "Elegí el empleado y pegá al menos una línea."; return; }',
+    '  fetch("/admin/adelantos-importar-masivo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, texto: texto})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var m = "✅ Se importaron " + data.agregados + " adelanto(s).";',
+    '      if (data.errores && data.errores.length > 0) { m += "\\n⚠️ Líneas con problema:\\n" + data.errores.join("\\n"); }',
+    '      msg.textContent = m;',
+    '      document.getElementById("miTexto").value = "";',
+    '      cargarTodo();',
     '    })',
     '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
     '});',
@@ -4615,6 +4828,48 @@ app.post("/admin/adelantos-agregar", requireAdminApi, (req, res) => {
   } catch (err) {
     console.error("Error agregando adelanto:", err);
     res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+// Carga varios adelantos de una sola vez, pegando texto en vez de tipear cada fila a mano.
+// Formato esperado, una línea por adelanto: fecha|monto|medio|nota (nota es opcional)
+// Ejemplo: 2026-06-05|61961.11|mercadopago|
+//          2026-07-18|50000|efectivo|
+app.post("/admin/adelantos-importar-masivo", requireAdminApi, (req, res) => {
+  try {
+    const { empleado, texto } = req.body;
+    if (!empleado || !texto || !texto.trim()) {
+      return res.status(400).json({ error: "Falta el empleado o el texto a importar" });
+    }
+    const lineas = texto.split("\n").map((l) => l.trim()).filter(Boolean);
+    const lista = loadAdelantos();
+    let agregados = 0;
+    const errores = [];
+    lineas.forEach((linea, idx) => {
+      const partes = linea.split("|").map((p) => p.trim());
+      const [fecha, montoTexto, medioPago, nota] = partes;
+      const monto = Number(montoTexto);
+      if (!fecha || !monto || !["efectivo", "mercadopago"].includes(medioPago)) {
+        errores.push(`Línea ${idx + 1}: "${linea}" — no se pudo interpretar (formato: fecha|monto|medio|nota)`);
+        return;
+      }
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + idx,
+        empleado: String(empleado).trim(),
+        fecha,
+        monto,
+        medioPago,
+        nota: nota ? nota.trim() : "",
+        saldado: false,
+        creadoEn: new Date().toISOString(),
+      });
+      agregados++;
+    });
+    saveAdelantos(lista);
+    res.json({ ok: true, agregados, errores });
+  } catch (err) {
+    console.error("Error importando adelantos en masa:", err);
+    res.status(500).json({ error: "No se pudo importar" });
   }
 });
 
