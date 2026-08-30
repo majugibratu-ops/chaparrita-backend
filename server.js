@@ -3,6 +3,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
+const AdmZip = require("adm-zip");
 const pdfParse = require("pdf-parse");
 const { buildSystemPrompt } = require("./systemPrompt");
 
@@ -153,6 +154,56 @@ function loadFacturas() {
 }
 function saveFacturas(lista) {
   fs.writeFileSync(FACTURAS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
+// ---- Adelantos de sueldo a empleados (efectivo o Mercadopago) — para saber en todo
+// momento cuánto se le debe descontar a cada uno en el próximo sueldo. ----
+const ADELANTOS_PATH = path.join(DATA_DIR, "adelantos.json");
+function loadAdelantos() {
+  try {
+    return JSON.parse(fs.readFileSync(ADELANTOS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveAdelantos(lista) {
+  fs.writeFileSync(ADELANTOS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
+// ---- Sueldos mensuales por empleado. Dos tipos:
+//      "normal" — un solo monto, el que figura tal cual en su recibo (sirve también para
+//      empleados en negro, cargando el mismo número de referencia que un recibo formal).
+//      "mariano" — regla especial confirmada: tiene 4hs declaradas pero trabaja 8 (4 en
+//      blanco + 4 en negro), así que se toma el recibo declarado (que ya incluye el premio
+//      de feriado del contador si correspondió ese mes) DOS veces, más un tercer monto base
+//      fijo por su tarea de encargado de cocina (sin feriados/vacaciones adentro).
+//      Total = tipo "normal" -> montoRecibo
+//              tipo "mariano" -> (2 × montoRecibo) + montoBase
+const SUELDOS_PATH = path.join(DATA_DIR, "sueldos.json");
+function loadSueldos() {
+  try {
+    return JSON.parse(fs.readFileSync(SUELDOS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveSueldos(lista) {
+  fs.writeFileSync(SUELDOS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
+// ---- Lista fija de empleados para sueldos/adelantos (nombre completo + tipo de cálculo).
+//      Evita que un mismo empleado quede duplicado por escribir el nombre distinto cada vez
+//      (ej: "Mariano" un mes y "Mariano Coceres" otro mes). ----
+const EMPLEADOS_PATH = path.join(DATA_DIR, "empleados.json");
+function loadEmpleados() {
+  try {
+    return JSON.parse(fs.readFileSync(EMPLEADOS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveEmpleados(lista) {
+  fs.writeFileSync(EMPLEADOS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
@@ -1324,8 +1375,6 @@ const pendingCantidadCompras = new Map();
 // ---- Pedidos esperando confirmación de que ya se cargaron en el sistema (FUDO u otro):
 //      telefonoDeQuienDebeConfirmar (normalizado) -> [{id, resumen, clientePhone, creadaEn}] ----
 const pendingComandas = new Map();
-// Evita avisarle al cliente más de una vez si varias personas confirman el mismo pedido.
-const comandasYaAvisadasAlCliente = new Set();
 
 // ---- Evita procesar el mismo pedido confirmado más de una vez (por ejemplo si el
 //      cliente escribe "sí" o "confirmo" varias veces seguidas) — telefono -> {resumen, procesadoEn} ----
@@ -1386,6 +1435,7 @@ const {
   FUDO_API_KEY,
   FUDO_API_SECRET,
   ES_STAGING,
+  SUELDOS_PASSWORD,
   PORT = 3000,
 } = process.env;
 
@@ -1500,6 +1550,88 @@ app.post("/admin/login-check", (req, res) => {
 app.get("/admin/logout", (req, res) => {
   cerrarSesionAdmin(req, res);
   res.redirect("/admin/login");
+});
+
+// ==================== Segunda contraseña, solo para /admin/sueldos ====================
+// Datos de sueldos son más sensibles que el resto del panel, así que además de la
+// contraseña general de /admin, pide una segunda y propia para entrar acá.
+const SUELDOS_SESSIONS = new Map();
+const SUELDOS_SESSION_COOKIE = "chap_sueldos_sesion";
+const SUELDOS_SESSION_DURATION_MS = 4 * 60 * 60 * 1000; // 4hs — más corta que la general, a propósito
+
+function tieneSesionSueldosValida(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[SUELDOS_SESSION_COOKIE];
+  if (!token) return false;
+  const expira = SUELDOS_SESSIONS.get(token);
+  if (!expira || expira < Date.now()) {
+    SUELDOS_SESSIONS.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function crearSesionSueldos(res) {
+  const token = crypto.randomBytes(24).toString("hex");
+  SUELDOS_SESSIONS.set(token, Date.now() + SUELDOS_SESSION_DURATION_MS);
+  res.setHeader(
+    "Set-Cookie",
+    `${SUELDOS_SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SUELDOS_SESSION_DURATION_MS / 1000)}; SameSite=Lax`
+  );
+}
+
+// Middleware para la página HTML de /admin/sueldos: pide la sesión general de admin
+// (requireAdminPage ya se aplica antes) Y, encima, esta segunda sesión propia.
+function requireSueldosPage(req, res, next) {
+  if (tieneSesionSueldosValida(req)) return next();
+  return res.redirect("/admin/sueldos-login");
+}
+
+function requireSueldosApi(req, res, next) {
+  if (tieneSesionSueldosValida(req)) return next();
+  return res.status(401).json({ error: "Sesión de sueldos vencida, iniciá sesión de nuevo." });
+}
+
+app.get("/admin/sueldos-login", requireAdminPage, (_req, res) => {
+  res.type("html").send([
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Chaparrita - Sueldos</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .login-shell { max-width: 380px; margin: 100px auto; text-align: center; padding: 0 20px; }
+      .login-icono { width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 18px; display: flex; align-items: center; justify-content: center; font-size: 30px; background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); box-shadow: var(--sombra); }
+      .login-shell input[type=password] { text-align: center; font-size: 16px; padding: 13px; }
+      .login-shell button { width: 100%; padding: 13px; font-size: 14.5px; }
+    </style>`,
+    '</head><body>',
+    '<div class="login-shell">',
+    '<div class="login-icono">🔒</div>',
+    '<h1>Sueldos</h1>',
+    '<p class="sub">Esta sección tiene una contraseña aparte de la del panel general.</p>',
+    '<input type="password" id="password" placeholder="Contraseña de sueldos" autofocus />',
+    '<button class="btn-primary" id="btnEntrar">Entrar</button>',
+    '<div id="msg"></div>',
+    '</div>',
+    '<script>',
+    'function intentarEntrar() {',
+    '  var pw = document.getElementById("password").value;',
+    '  fetch("/admin/sueldos-login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    '    .then(function(){ window.location.href = "/admin/sueldos"; })',
+    '    .catch(function(e){ document.getElementById("msg").textContent = e.message; document.getElementById("msg").className = "msg-error"; });',
+    '}',
+    'document.getElementById("btnEntrar").addEventListener("click", intentarEntrar);',
+    'document.getElementById("password").addEventListener("keydown", function(e){ if (e.key === "Enter") intentarEntrar(); });',
+    '</' + 'script>',
+    '</body></html>'
+  ].join("\n"));
+});
+
+app.post("/admin/sueldos-login-check", requireAdminApi, (req, res) => {
+  if (!SUELDOS_PASSWORD || req.body.password !== SUELDOS_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña incorrecta" });
+  }
+  crearSesionSueldos(res);
+  res.json({ ok: true });
 });
 
 // ==================== Verificación del webhook (Meta) ====================
@@ -1700,6 +1832,10 @@ app.post("/webhook", async (req, res) => {
     const telQuienResponde = soloDigitos(from);
     const pareceConfirmacionCorta = message.type === "text" && message.text.body.trim().length <= 60 && (message.text.body.match(/\n/g) || []).length <= 1;
     if (pareceConfirmacionCorta && pendingComandas.has(telQuienResponde) && pendingComandas.get(telQuienResponde).length > 0) {
+      // pendingComandas hoy contiene dos tipos de control: confirmación de reserva agendada,
+      // y confirmación de cocina de que le llegó bien la comanda impresa (el viejo caso
+      // "cajero" con número de pedido + link de FUDO se sacó, quedó obsoleto al integrar
+      // el pedido automático con FUDO).
       const cola = pendingComandas.get(telQuienResponde);
       const confirmado = cola.shift();
       if (cola.length === 0) {
@@ -1715,18 +1851,17 @@ app.post("/webhook", async (req, res) => {
 
       const avisoRestante = cola.length > 0 ? ` Todavía te queda${cola.length === 1 ? "" : "n"} ${cola.length} pedido${cola.length === 1 ? "" : "s"} más por confirmar.` : "";
 
-      if (confirmado.tipo === "reserva") {
-        // Control puramente interno: el cliente ya recibió su confirmación normal del
-        // bot cuando se armó la reserva, acá no le mandamos nada más.
-        await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar que quedó agendada! 🙌${avisoRestante}`);
-      } else {
-        // Tipo "cajero": le reenviamos su respuesta (número de pedido + link) tal cual al
-        // cliente, solo una vez aunque varias personas confirmen el mismo pedido.
-        if (!comandasYaAvisadasAlCliente.has(confirmado.id)) {
-          comandasYaAvisadasAlCliente.add(confirmado.id);
-          await sendWhatsappText(confirmado.clientePhone, `¡Tu pedido ya está cargado en el sistema! 📦 Podés seguirlo acá:\n\n${textoRespuesta}`);
+      if (confirmado.tipo === "comanda_cocina") {
+        const dijoQueNoLlego = /\bno\b/i.test(textoRespuesta) && !/\bsi\b|\bsí\b/i.test(textoRespuesta);
+        if (dijoQueNoLlego) {
+          await sendWhatsappText(from, `Anotado, gracias por avisar 🙏 Revisá la impresora — si hace falta, pedile el pedido de nuevo a quien lo cargó.${avisoRestante}`);
+        } else {
+          await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar! 👨‍🍳${avisoRestante}`);
         }
-        await sendWhatsappText(from, `¡Buenísimo, gracias! Ya se lo reenvié al cliente. 🙌${avisoRestante}`);
+      } else {
+        // Control puramente interno: el cliente ya recibió su confirmación normal del bot
+        // cuando se armó la reserva, acá no le mandamos nada más.
+        await sendWhatsappText(from, `¡Buenísimo, gracias por confirmar que quedó agendada! 🙌${avisoRestante}`);
       }
       return;
     }
@@ -2089,10 +2224,12 @@ app.post("/webhook", async (req, res) => {
         }
         const avisosActivos = equipoConPermiso(config, "recibeReservas");
         const idComandaReserva = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
-        const mensajeConSolicitud = `${reservaConfirmada}\n\n¿Me confirmás que ya quedó agendada? Contestame "sí" cuando esté 🙏`;
         for (const aviso of avisosActivos) {
           const telAviso = soloDigitos(aviso.telefono);
-          await sendWhatsappText(telAviso, mensajeConSolicitud);
+          await sendWhatsappText(telAviso, reservaConfirmada);
+          await sendWhatsappButtons(telAviso, "¿Me confirmás que ya quedó agendada?", [
+            { id: "reserva_confirmada", titulo: "Sí, confirmado ✅" },
+          ]);
           const cola = pendingComandas.get(telAviso) || [];
           cola.push({ id: idComandaReserva, tipo: "reserva", resumen: reservaConfirmada, clientePhone: from, creadaEn: Date.now() });
           pendingComandas.set(telAviso, cola);
@@ -2126,7 +2263,6 @@ app.post("/webhook", async (req, res) => {
         ultimoPedidoConfirmadoPorCliente.set(soloDigitos(from), { itemsNormalizados, procesadoEn: Date.now() });
 
       const avisosPedido = equipoConPermiso(config, "recibePedidos");
-      const idComanda = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 
       // Intentamos crear el pedido automáticamente en FUDO primero. Si no se puede (por
       // cualquier motivo: catálogo no matcheado, error de red, etc.), seguimos con el
@@ -2166,17 +2302,32 @@ app.post("/webhook", async (req, res) => {
         const telAviso = soloDigitos(aviso.telefono);
         const esCocina = aviso.areaCompras === "cocina";
         if (esCocina) {
-          // A cocina le llega el pedido normal, sin pedirle que confirme nada.
+          // A cocina le llega el pedido normal, y le pedimos que confirme que le llegó
+          // bien la comanda impresa — es un control real (si dice que no, puede ser que
+          // falló la impresora), distinto del viejo pedido de número+link que ya no hace
+          // falta (ese se sacó al integrar el pedido automático con FUDO).
           await sendWhatsappText(telAviso, pedidoConfirmado);
+          await sendWhatsappButtons(telAviso, "¿Te llegó bien la comanda impresa?", [
+            { id: "comanda_recibida", titulo: "Sí, recibida ✅" },
+            { id: "comanda_no_recibida", titulo: "No, revisar 🖨️" },
+          ]);
+          const colaCocina = pendingComandas.get(telAviso) || [];
+          colaCocina.push({
+            id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+            tipo: "comanda_cocina",
+            resumen: pedidoConfirmado,
+            clientePhone: from,
+            creadaEn: Date.now(),
+          });
+          pendingComandas.set(telAviso, colaCocina);
         } else if (resultadoFudo.ok) {
-          // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle que
-          // tipee el número de pedido a mano.
+          // Ya se cargó solo en FUDO — le avisamos, pero no hace falta pedirle nada más.
           await sendWhatsappText(telAviso, `✅ Este pedido ya se cargó solo en FUDO:\n\n${pedidoConfirmado}`);
         } else {
-          await sendWhatsappText(telAviso, `${pedidoConfirmado}\n\n¿Me pasás el número de pedido y el link de seguimiento de FUDO para avisarle al cliente? Por ejemplo: "Pedido #5815 - https://..." 🙏`);
-          const cola = pendingComandas.get(telAviso) || [];
-          cola.push({ id: idComanda, tipo: "cajero", resumen: pedidoConfirmado, clientePhone: from, creadaEn: Date.now() });
-          pendingComandas.set(telAviso, cola);
+          // El auto-cargado a FUDO falló — se lo pasamos igual para que lo carguen a mano,
+          // pero ya no hace falta pedirle que tipee el número de pedido/link de vuelta acá
+          // (con la integración a FUDO ese paso quedó obsoleto).
+          await sendWhatsappText(telAviso, `⚠️ Este pedido no se pudo cargar solo en FUDO, hace falta cargarlo a mano:\n\n${pedidoConfirmado}`);
         }
       }
 
@@ -2407,13 +2558,21 @@ app.post("/webhook", async (req, res) => {
       const staffPhones = equipoConPermiso(config, "confirmaComprobantes")
         .map((s) => soloDigitos(s.telefono))
         .filter((tel) => tel && tel.length >= 10);
-      const captionAviso = `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación. Contestame acá mismo con "sí" o "no" (o contame el motivo si no es válido) para que se lo reenvíe automáticamente.`;
+      const captionAviso = `📎 Comprobante recibido de +${from}. Revisá y confirmá el pago cuando puedas — el cliente ya está esperando la confirmación.`;
       for (const tel of staffPhones) {
         if (message.type === "image") {
           await sendWhatsappImage(tel, message.image.id, captionAviso);
         } else {
           await sendWhatsappDocument(tel, message.document.id, captionAviso, message.document.filename || "comprobante.pdf");
         }
+        // Las imágenes/documentos no admiten botones en el mismo mensaje (limitación de
+        // WhatsApp), así que los botones van en un mensaje aparte, justo después. Si el
+        // motivo del rechazo no encaja en un botón, el staff igual puede escribirlo como
+        // texto libre — el flujo de arriba lo sigue aceptando igual que antes.
+        await sendWhatsappButtons(tel, "¿Confirmás el pago? (o escribime el motivo si hay algún problema)", [
+          { id: "comprobante_confirmado", titulo: "Sí, confirmado ✅" },
+          { id: "comprobante_rechazado", titulo: "No, hay problema" },
+        ]);
         pendingComprobantes.set(tel, { customerPhone: from, askedAt: Date.now() });
       }
     }
@@ -2822,6 +2981,8 @@ app.get("/admin", requireAdminPage, (_req, res) => {
         { href: "/admin/listaespera", icono: "⏳", titulo: "Lista de espera de mesas", desc: "Clientes esperando lugar cuando el sector está lleno." },
         { href: "/admin/compras", icono: "🛒", titulo: "Lista de compras", desc: "Historial por día — tildá lo que ya compraste, agregá o editá ítems." },
         { href: "/admin/facturas", icono: "🧾", titulo: "Facturas de proveedores", desc: "Facturas leídas por foto, pendientes de cargar en FUDO." },
+        { href: "/admin/adelantos", icono: "💵", titulo: "Adelantos de sueldo", desc: "Registrá adelantos en efectivo o Mercadopago y mirá cuánto le debés a cada empleado." },
+        { href: "/admin/sueldos", icono: "🧾", titulo: "Sueldos mensuales", desc: "Cargá el sueldo de cada mes (con la regla especial de Mariano) y mirá el neto a pagar tras descontar adelantos." },
         { href: "/admin/fudo-stock", icono: "📦", titulo: "Stock, ingredientes y proveedores (FUDO)", desc: "Trae los datos reales de FUDO y permite corregirlos ahí mismo." },
         { href: "/admin/postulantes", icono: "📋", titulo: "Postulantes / CVs", desc: "Gente que dejó su CV, con puntaje automático." },
       ],
@@ -3747,6 +3908,1148 @@ app.post("/admin/compras-agregar", requireAdminApi, (req, res) => {
 });
 
 // ==================== Panel de facturas de proveedores (mientras no hay API de FUDO) ====================
+// Lista de empleados — dos endpoints separados a propósito:
+// - "empleados-nombres": solo nombre + tipo, sin datos personales. Alcanza con la
+//   contraseña general — lo usa /admin/adelantos para su desplegable.
+// - "empleados-data": ficha completa (CUIT, DNI, dirección, teléfono). Datos personales
+//   sensibles, así que pide las DOS contraseñas — solo se usa dentro de /admin/sueldos.
+app.post("/admin/empleados-nombres", requireAdminApi, (_req, res) => {
+  res.json(loadEmpleados().map((e) => ({ id: e.id, nombre: e.nombre, tipo: e.tipo })));
+});
+
+app.post("/admin/empleados-data", requireAdminApi, requireSueldosApi, (_req, res) => {
+  res.json(loadEmpleados());
+});
+
+app.post("/admin/empleados-agregar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { nombre, tipo, cuit, dni, direccion, telefono } = req.body;
+    if (!nombre || !["normal", "mariano"].includes(tipo)) {
+      return res.status(400).json({ error: "Falta el nombre o el tipo no es válido" });
+    }
+    const lista = loadEmpleados();
+    if (lista.some((e) => e.nombre.toLowerCase() === String(nombre).trim().toLowerCase())) {
+      return res.status(400).json({ error: "Ya existe un empleado con ese nombre" });
+    }
+    lista.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      nombre: String(nombre).trim(),
+      tipo,
+      cuit: cuit ? String(cuit).trim() : "",
+      dni: dni ? String(dni).trim() : "",
+      direccion: direccion ? String(direccion).trim() : "",
+      telefono: telefono ? normalizarTelefonoArgentino(telefono) : "",
+    });
+    saveEmpleados(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error agregando empleado:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/empleados-editar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { id, nombre, tipo, cuit, dni, direccion, telefono } = req.body;
+    if (!id || !nombre || !["normal", "mariano"].includes(tipo)) {
+      return res.status(400).json({ error: "Falta el id, el nombre, o el tipo no es válido" });
+    }
+    const lista = loadEmpleados();
+    const empleado = lista.find((e) => e.id === id);
+    if (!empleado) return res.status(404).json({ error: "Empleado no encontrado" });
+    if (lista.some((e) => e.id !== id && e.nombre.toLowerCase() === String(nombre).trim().toLowerCase())) {
+      return res.status(400).json({ error: "Ya existe otro empleado con ese nombre" });
+    }
+    empleado.nombre = String(nombre).trim();
+    empleado.tipo = tipo;
+    empleado.cuit = cuit ? String(cuit).trim() : "";
+    empleado.dni = dni ? String(dni).trim() : "";
+    empleado.direccion = direccion ? String(direccion).trim() : "";
+    empleado.telefono = telefono ? normalizarTelefonoArgentino(telefono) : "";
+    saveEmpleados(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error editando empleado:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/empleados-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { id } = req.body;
+    saveEmpleados(loadEmpleados().filter((e) => e.id !== id));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error borrando empleado:", err);
+    res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
+app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Chaparrita - Sueldos mensuales</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .form-sueldo { display: grid; gap: 10px; max-width: 420px; margin-bottom: 28px; }
+      .form-sueldo label { font-size: 12.5px; color: var(--texto-tenue); }
+      .empleado-card { margin-bottom: 18px; }
+      .empleado-card h3 { margin: 0 0 4px; font-size: 16px; }
+      .linea { font-size: 13.5px; margin: 2px 0; }
+      .neto { font-weight: 700; font-size: 16px; margin-top: 6px; color: var(--verde-wa); }
+      .filtro-mes { margin-bottom: 18px; }
+      .filtro-mes select { width: auto; margin-top: 0; }
+      #camposMariano { display: none; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor" style="max-width:820px">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>🧾 Sueldos mensuales</h1>',
+    '<p class="sub">Cargá el sueldo de cada mes tal como figura en el recibo. Para Mariano, la app aplica su regla especial de cálculo automáticamente.</p>',
+
+    '<h2>Empleados</h2>',
+    '<p class="sub" style="margin-top:-6px">Dados de alta una sola vez acá, para no duplicar a nadie por escribir el nombre distinto cada mes.</p>',
+    '<div id="listaEmpleadosBox" style="margin-bottom:14px"></div>',
+    '<div class="form-sueldo" style="max-width:420px;margin-bottom:24px">',
+    '<div><label>Nombre completo</label><input id="nEmpleado" type="text" placeholder="Nombre y apellido"></div>',
+    '<div><label>Tipo</label><select id="nTipo"><option value="normal">Normal</option><option value="mariano">Mariano (regla especial)</option></select></div>',
+    '<div><label>CUIT</label><input id="nCuit" type="text" placeholder="20-12345678-9"></div>',
+    '<div><label>DNI</label><input id="nDni" type="text" placeholder="12345678"></div>',
+    '<div><label>Dirección</label><input id="nDireccion" type="text" placeholder="Calle, número, barrio"></div>',
+    '<div><label>Teléfono</label><input id="nTelefono" type="text" placeholder="+54 9 370 5263752"></div>',
+    '<button id="btnAddEmpleado">Guardar empleado</button>',
+    '<button id="btnCancelarEdicion" class="secundario" style="display:none">Cancelar edición</button>',
+    '<div id="msgEmpleado" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Cargar sueldo del mes</h2>',
+    '<div class="form-sueldo">',
+    '<div><label>Empleado</label><select id="fEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Mes</label><input id="fMes" type="month"></div>',
+    '<div><label>Tipo</label><select id="fTipo"><option value="normal">Normal (un solo recibo)</option><option value="mariano">Mariano (regla especial)</option></select></div>',
+    '<div id="campoNormal"><label>Monto del recibo (tal como figura)</label><input id="fMontoRecibo" type="number" step="any" placeholder="$"></div>',
+    '<div id="camposMariano">',
+    '<label>Monto del recibo de 4hs declarado (con feriado incluido si corresponde)</label><input id="fMontoDeclarado" type="number" step="any" placeholder="$">',
+    '<label>Monto base sin especiales (tarea de encargado)</label><input id="fMontoBase" type="number" step="any" placeholder="$">',
+    '</div>',
+    '<div id="totalPreview" style="font-weight:600"></div>',
+    '<button id="btnAgregar">Cargar sueldo</button>',
+    '<div id="msgForm" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Importar varios sueldos de una vez</h2>',
+    '<p class="sub" style="margin-top:-6px">Una línea por mes. Normal: <code>mes|normal|montoRecibo</code>. Mariano: <code>mes|mariano|montoDeclarado|montoBase</code>. Ejemplo: <code>2026-06|normal|508290.47</code></p>',
+    '<div class="form-sueldo" style="max-width:520px">',
+    '<div><label>Empleado</label><select id="miEmpleadoSueldo"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Pegar líneas</label><textarea id="miTextoSueldo" rows="6" placeholder="2026-06|normal|508290.47\n2026-07|normal|799018.52"></textarea></div>',
+    '<button id="btnImportarSueldos">Importar todo</button>',
+    '<div id="msgImportarSueldos" style="font-size:13px;white-space:pre-wrap"></div>',
+    '</div>',
+
+    '<h2>Resumen para mandarle al empleado</h2>',
+    '<p class="sub" style="margin-top:-6px">Arma un texto prolijo con el detalle de sueldo y cada adelanto, listo para copiar y pegar en WhatsApp.</p>',
+    '<div class="form-sueldo" style="max-width:520px">',
+    '<div><label>Empleado</label><select id="rEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Desde (mes)</label><input id="rMesDesde" type="month"></div>',
+    '<div><label>Hasta (mes)</label><input id="rMesHasta" type="month"></div>',
+    '<button id="btnGenerarResumen">Generar resumen</button>',
+    '<textarea id="rResultado" rows="14" style="display:none;font-family:monospace;font-size:12.5px" readonly></textarea>',
+    '<button id="btnCopiarResumen" style="display:none" class="secundario">Copiar texto</button>',
+    '<div id="msgResumen" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Resumen por empleado (sueldo − adelantos pendientes)</h2>',
+    '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
+    '<div id="resumen">Cargando...</div>',
+
+    '<script>',
+    'var SUELDOS = []; var ADELANTOS = []; var EMPLEADOS = [];',
+    'function hoyMes(){ var d=new Date(); return d.toISOString().slice(0,7); }',
+    'document.getElementById("fMes").value = hoyMes();',
+    '',
+    'function nombreMes(mesISO){',
+    '  var partes = mesISO.split("-"); var meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];',
+    '  return meses[parseInt(partes[1],10)-1] + " " + partes[0];',
+    '}',
+    '',
+    'function cargarEmpleados(){',
+    '  return fetch("/admin/empleados-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      EMPLEADOS = data;',
+    '      pintarListaEmpleados();',
+    '      pintarSelectEmpleado();',
+    '    });',
+    '}',
+    'var editandoId = null;',
+    'function pintarListaEmpleados(){',
+    '  var box = document.getElementById("listaEmpleadosBox");',
+    '  box.innerHTML = "";',
+    '  EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '    var div = document.createElement("div");',
+    '    div.className = "card"; div.style.padding = "10px 14px"; div.style.marginBottom = "8px";',
+    '    div.innerHTML = "<b>" + e.nombre + "</b> <span style=\\"color:var(--texto-tenue);font-size:12.5px\\">(" + (e.tipo === "mariano" ? "regla especial" : "normal") + ")</span>" +',
+    '      "<div style=\\"font-size:12.5px;color:var(--texto-tenue);margin-top:3px\\">" +',
+    '      (e.cuit ? "CUIT: " + e.cuit + " · " : "") + (e.dni ? "DNI: " + e.dni + " · " : "") + (e.telefono ? "Tel: " + e.telefono : "") +',
+    '      (e.direccion ? "<br>" + e.direccion : "") + "</div>";',
+    '    var btnEditar = document.createElement("button"); btnEditar.textContent = "Editar"; btnEditar.className = "secundario"; btnEditar.style.fontSize = "12px";',
+    '    btnEditar.addEventListener("click", function(){ cargarEnFormulario(e); });',
+    '    var btnDel = document.createElement("button");',
+    '    btnDel.textContent = "✕ Sacar"; btnDel.className = "btn-danger"; btnDel.style.fontSize = "12px"; btnDel.style.marginLeft = "6px";',
+    '    btnDel.addEventListener("click", function(){',
+    '      if (!confirm("¿Sacar a " + e.nombre + " de la lista de empleados? (no borra los sueldos/adelantos ya cargados)")) return;',
+    '      fetch("/admin/empleados-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: e.id})})',
+    '        .then(function(r){ return r.json(); }).then(cargarEmpleados);',
+    '    });',
+    '    div.appendChild(btnEditar); div.appendChild(btnDel);',
+    '    box.appendChild(div);',
+    '  });',
+    '}',
+    'function cargarEnFormulario(e){',
+    '  editandoId = e.id;',
+    '  document.getElementById("nEmpleado").value = e.nombre;',
+    '  document.getElementById("nTipo").value = e.tipo;',
+    '  document.getElementById("nCuit").value = e.cuit || "";',
+    '  document.getElementById("nDni").value = e.dni || "";',
+    '  document.getElementById("nDireccion").value = e.direccion || "";',
+    '  document.getElementById("nTelefono").value = e.telefono || "";',
+    '  document.getElementById("btnAddEmpleado").textContent = "Guardar cambios";',
+    '  document.getElementById("btnCancelarEdicion").style.display = "inline-block";',
+    '  document.getElementById("nEmpleado").scrollIntoView({behavior:"smooth", block:"center"});',
+    '}',
+    'function limpiarFormularioEmpleado(){',
+    '  editandoId = null;',
+    '  document.getElementById("nEmpleado").value = "";',
+    '  document.getElementById("nCuit").value = "";',
+    '  document.getElementById("nDni").value = "";',
+    '  document.getElementById("nDireccion").value = "";',
+    '  document.getElementById("nTelefono").value = "";',
+    '  document.getElementById("nTipo").value = "normal";',
+    '  document.getElementById("btnAddEmpleado").textContent = "Guardar empleado";',
+    '  document.getElementById("btnCancelarEdicion").style.display = "none";',
+    '}',
+    'document.getElementById("btnCancelarEdicion").addEventListener("click", limpiarFormularioEmpleado);',
+    'function pintarSelectEmpleado(){',
+    '  ["fEmpleado", "miEmpleadoSueldo", "rEmpleado"].forEach(function(idSelect){',
+    '    var select = document.getElementById(idSelect);',
+    '    var valorActual = select.value;',
+    '    select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
+    '    EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '      var opt = document.createElement("option"); opt.value = e.nombre; opt.dataset.tipo = e.tipo; opt.textContent = e.nombre;',
+    '      select.appendChild(opt);',
+    '    });',
+    '    select.value = valorActual;',
+    '  });',
+    '}',
+    'document.getElementById("btnAddEmpleado").addEventListener("click", function(){',
+    '  var nombre = document.getElementById("nEmpleado").value.trim();',
+    '  var tipo = document.getElementById("nTipo").value;',
+    '  var cuit = document.getElementById("nCuit").value.trim();',
+    '  var dni = document.getElementById("nDni").value.trim();',
+    '  var direccion = document.getElementById("nDireccion").value.trim();',
+    '  var telefono = document.getElementById("nTelefono").value.trim();',
+    '  var msg = document.getElementById("msgEmpleado");',
+    '  if (!nombre) { msg.textContent = "Falta el nombre."; return; }',
+    '  var body = { nombre: nombre, tipo: tipo, cuit: cuit, dni: dni, direccion: direccion, telefono: telefono };',
+    '  var url = "/admin/empleados-agregar";',
+    '  if (editandoId) { body.id = editandoId; url = "/admin/empleados-editar"; }',
+    '  fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = data.error; return; }',
+    '      msg.textContent = "";',
+    '      limpiarFormularioEmpleado();',
+    '      cargarEmpleados();',
+    '    });',
+    '});',
+    '// Al elegir un empleado ya cargado, auto-selecciona su tipo (Mariano vs normal).',
+    'document.getElementById("fEmpleado").addEventListener("change", function(){',
+    '  var opt = this.options[this.selectedIndex];',
+    '  if (opt && opt.dataset.tipo) {',
+    '    document.getElementById("fTipo").value = opt.dataset.tipo;',
+    '    document.getElementById("fTipo").dispatchEvent(new Event("change"));',
+    '  }',
+    '});',
+    '',
+    'document.getElementById("fTipo").addEventListener("change", function(){',
+    '  var esMariano = this.value === "mariano";',
+    '  document.getElementById("campoNormal").style.display = esMariano ? "none" : "block";',
+    '  document.getElementById("camposMariano").style.display = esMariano ? "block" : "none";',
+    '  actualizarPreview();',
+    '});',
+    'function calcularTotal(tipo, montoRecibo, montoDeclarado, montoBase){',
+    '  if (tipo === "mariano") return (2 * (montoDeclarado||0)) + (montoBase||0);',
+    '  return montoRecibo||0;',
+    '}',
+    'function actualizarPreview(){',
+    '  var tipo = document.getElementById("fTipo").value;',
+    '  var total;',
+    '  if (tipo === "mariano") {',
+    '    total = calcularTotal(tipo, 0, parseFloat(document.getElementById("fMontoDeclarado").value)||0, parseFloat(document.getElementById("fMontoBase").value)||0);',
+    '  } else {',
+    '    total = calcularTotal(tipo, parseFloat(document.getElementById("fMontoRecibo").value)||0, 0, 0);',
+    '  }',
+    '  document.getElementById("totalPreview").textContent = "Total del mes: $" + total.toLocaleString("es-AR");',
+    '}',
+    '["fMontoRecibo","fMontoDeclarado","fMontoBase"].forEach(function(id){ document.getElementById(id).addEventListener("input", actualizarPreview); });',
+    '',
+    'function pintarFiltroMes(){',
+    '  var select = document.getElementById("filtroMes");',
+    '  var mesesUnicos = Array.from(new Set(SUELDOS.map(function(s){ return s.mes; }).concat(ADELANTOS.map(function(a){ return a.fecha.slice(0,7); })))).sort().reverse();',
+    '  var mesActual = hoyMes();',
+    '  if (mesesUnicos.indexOf(mesActual) === -1) mesesUnicos.unshift(mesActual);',
+    '  select.innerHTML = "";',
+    '  mesesUnicos.forEach(function(m){ var opt = document.createElement("option"); opt.value = m; opt.textContent = nombreMes(m); select.appendChild(opt); });',
+    '  select.value = mesActual;',
+    '}',
+    '',
+    '',
+    'function pintarResumen(){',
+    '  var mesElegido = document.getElementById("filtroMes").value;',
+    '  var sueldosDelMes = SUELDOS.filter(function(s){ return s.mes === mesElegido; });',
+    '  var nombres = Array.from(new Set(sueldosDelMes.map(function(s){ return s.empleado; }))).sort();',
+    '  var cont = document.getElementById("resumen");',
+    '  cont.innerHTML = "";',
+    '  if (nombres.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🧾</div>No hay sueldos cargados este mes.</div>"; return; }',
+    '  nombres.forEach(function(nombre){',
+    '    var sueldo = sueldosDelMes.filter(function(s){ return s.empleado === nombre; }).slice(-1)[0];',
+    '    var adelantosPendientes = ADELANTOS.filter(function(a){ return a.empleado === nombre && a.fecha.slice(0,7) === mesElegido && !a.saldado; });',
+    '    var totalAdelantos = adelantosPendientes.reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '    var neto = sueldo.total - totalAdelantos;',
+    '    var div = document.createElement("div");',
+    '    div.className = "card empleado-card";',
+    '    var detalle = sueldo.tipo === "mariano"',
+    '      ? "(2 × $" + Number(sueldo.montoDeclarado).toLocaleString("es-AR") + ") + $" + Number(sueldo.montoBase).toLocaleString("es-AR")',
+    '      : "Recibo: $" + Number(sueldo.montoRecibo).toLocaleString("es-AR");',
+    '    div.innerHTML = "<h3>" + nombre + "</h3>" +',
+    '      "<div class=\\"linea\\">Sueldo del mes: $" + sueldo.total.toLocaleString("es-AR") + " <span style=\\"color:var(--texto-tenue)\\">(" + detalle + ")</span></div>" +',
+    '      "<div class=\\"linea\\">Adelantos pendientes: -$" + totalAdelantos.toLocaleString("es-AR") + "</div>" +',
+    '      "<div class=\\"neto\\">Neto a pagar: $" + neto.toLocaleString("es-AR") + "</div>" +',
+    '      "<button class=\\"btn-danger\\" data-id=\\"" + sueldo.id + "\\">✕ Borrar este sueldo cargado</button>";',
+    '    cont.appendChild(div);',
+    '  });',
+    '  document.querySelectorAll(".btn-danger").forEach(function(btn){',
+    '    btn.addEventListener("click", function(){',
+    '      if (!confirm("¿Borrar este sueldo cargado?")) return;',
+    '      fetch("/admin/sueldos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargarTodo(); });',
+    '    });',
+    '  });',
+    '}',
+    '',
+    'function cargarTodo(){',
+    '  Promise.all([',
+    '    fetch("/admin/sueldos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); }),',
+    '    fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); }),',
+    '    cargarEmpleados()',
+    '  ]).then(function(res){',
+    '    SUELDOS = res[0]; ADELANTOS = res[1];',
+    '    pintarFiltroMes(); pintarResumen();',
+    '  }).catch(function(e){ document.getElementById("resumen").textContent = "Error: " + e.message; });',
+    '}',
+    'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
+    'document.getElementById("btnAgregar").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("fEmpleado").value.trim();',
+    '  var mes = document.getElementById("fMes").value;',
+    '  var tipo = document.getElementById("fTipo").value;',
+    '  var msg = document.getElementById("msgForm");',
+    '  if (!empleado || !mes) { msg.textContent = "Completá empleado y mes."; return; }',
+    '  var body = { empleado: empleado, mes: mes, tipo: tipo };',
+    '  if (tipo === "mariano") {',
+    '    body.montoDeclarado = parseFloat(document.getElementById("fMontoDeclarado").value);',
+    '    body.montoBase = parseFloat(document.getElementById("fMontoBase").value);',
+    '    if (!body.montoDeclarado || !body.montoBase) { msg.textContent = "Completá los dos montos de Mariano."; return; }',
+    '  } else {',
+    '    body.montoRecibo = parseFloat(document.getElementById("fMontoRecibo").value);',
+    '    if (!body.montoRecibo) { msg.textContent = "Completá el monto del recibo."; return; }',
+    '  }',
+    '  fetch("/admin/sueldos-agregar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = "✅ Cargado.";',
+    '      cargarTodo();',
+    '      setTimeout(function(){ msg.textContent = ""; }, 2000);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    'document.getElementById("btnImportarSueldos").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("miEmpleadoSueldo").value;',
+    '  var texto = document.getElementById("miTextoSueldo").value;',
+    '  var msg = document.getElementById("msgImportarSueldos");',
+    '  if (!empleado || !texto.trim()) { msg.textContent = "Elegí el empleado y pegá al menos una línea."; return; }',
+    '  fetch("/admin/sueldos-importar-masivo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, texto: texto})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var m = "✅ Se importaron " + data.agregados + " mes(es).";',
+    '      if (data.errores && data.errores.length > 0) { m += "\\n⚠️ Líneas con problema:\\n" + data.errores.join("\\n"); }',
+    '      msg.textContent = m;',
+    '      document.getElementById("miTextoSueldo").value = "";',
+    '      cargarTodo();',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    'document.getElementById("btnGenerarResumen").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("rEmpleado").value;',
+    '  var mesDesde = document.getElementById("rMesDesde").value;',
+    '  var mesHasta = document.getElementById("rMesHasta").value;',
+    '  var msg = document.getElementById("msgResumen");',
+    '  if (!empleado || !mesDesde || !mesHasta) { msg.textContent = "Completá empleado y los dos meses."; return; }',
+    '  fetch("/admin/resumen-empleado", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, mesDesde: mesDesde, mesHasta: mesHasta})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var area = document.getElementById("rResultado");',
+    '      area.value = data.texto;',
+    '      area.style.display = "block";',
+    '      document.getElementById("btnCopiarResumen").style.display = "inline-block";',
+    '      msg.textContent = "";',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnCopiarResumen").addEventListener("click", function(){',
+    '  var area = document.getElementById("rResultado");',
+    '  area.select();',
+    '  navigator.clipboard.writeText(area.value).then(function(){',
+    '    document.getElementById("msgResumen").textContent = "✅ Copiado — ya lo podés pegar en WhatsApp.";',
+    '  }).catch(function(){',
+    '    document.getElementById("msgResumen").textContent = "No se pudo copiar solo, seleccioná el texto a mano.";',
+    '  });',
+    '});',
+    '',
+    'cargarTodo();',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/sueldos-data", requireAdminApi, requireSueldosApi, (_req, res) => {
+  res.json(loadSueldos());
+});
+
+app.post("/admin/sueldos-agregar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { empleado, mes, tipo, montoRecibo, montoDeclarado, montoBase } = req.body;
+    if (!empleado || !mes || !["normal", "mariano"].includes(tipo)) {
+      return res.status(400).json({ error: "Faltan datos o el tipo no es válido" });
+    }
+    let total, registro;
+    if (tipo === "mariano") {
+      if (!montoDeclarado || !montoBase) return res.status(400).json({ error: "Faltan los montos de Mariano" });
+      total = 2 * Number(montoDeclarado) + Number(montoBase);
+      registro = { montoDeclarado: Number(montoDeclarado), montoBase: Number(montoBase) };
+    } else {
+      if (!montoRecibo) return res.status(400).json({ error: "Falta el monto del recibo" });
+      total = Number(montoRecibo);
+      registro = { montoRecibo: Number(montoRecibo) };
+    }
+    const lista = loadSueldos();
+    lista.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      empleado: String(empleado).trim(),
+      mes,
+      tipo,
+      ...registro,
+      total,
+      creadoEn: new Date().toISOString(),
+    });
+    saveSueldos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error agregando sueldo:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+// Carga varios sueldos de una sola vez. Formato, una línea por mes:
+// tipo normal:  mes|normal|montoRecibo
+// tipo mariano: mes|mariano|montoDeclarado|montoBase
+// Ejemplo: 2026-06|normal|508290.47
+app.post("/admin/sueldos-importar-masivo", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { empleado, texto } = req.body;
+    if (!empleado || !texto || !texto.trim()) {
+      return res.status(400).json({ error: "Falta el empleado o el texto a importar" });
+    }
+    const lineas = texto.split("\n").map((l) => l.trim()).filter(Boolean);
+    const lista = loadSueldos();
+    let agregados = 0;
+    const errores = [];
+    lineas.forEach((linea, idx) => {
+      const partes = linea.split("|").map((p) => p.trim());
+      const [mes, tipo, a, b] = partes;
+      if (!mes || !["normal", "mariano"].includes(tipo)) {
+        errores.push(`Línea ${idx + 1}: "${linea}" — no se pudo interpretar`);
+        return;
+      }
+      let total, registro;
+      if (tipo === "mariano") {
+        const montoDeclarado = Number(a);
+        const montoBase = Number(b);
+        if (!montoDeclarado || !montoBase) {
+          errores.push(`Línea ${idx + 1}: "${linea}" — faltan los dos montos de Mariano`);
+          return;
+        }
+        total = 2 * montoDeclarado + montoBase;
+        registro = { montoDeclarado, montoBase };
+      } else {
+        const montoRecibo = Number(a);
+        if (!montoRecibo) {
+          errores.push(`Línea ${idx + 1}: "${linea}" — falta el monto del recibo`);
+          return;
+        }
+        total = montoRecibo;
+        registro = { montoRecibo };
+      }
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + idx,
+        empleado: String(empleado).trim(),
+        mes,
+        tipo,
+        ...registro,
+        total,
+        creadoEn: new Date().toISOString(),
+      });
+      agregados++;
+    });
+    saveSueldos(lista);
+    res.json({ ok: true, agregados, errores });
+  } catch (err) {
+    console.error("Error importando sueldos en masa:", err);
+    res.status(500).json({ error: "No se pudo importar" });
+  }
+});
+
+app.post("/admin/sueldos-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { id } = req.body;
+    const lista = loadSueldos().filter((s) => s.id !== id);
+    saveSueldos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error borrando sueldo:", err);
+    res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
+// Arma un resumen prolijo y transparente de sueldo + adelantos de un empleado, listo para
+// mandarle por WhatsApp — pensado para que el empleado vea el detalle completo (cada
+// adelanto con fecha y medio de pago) y no le queden dudas de cómo se llegó al total.
+app.post("/admin/resumen-empleado", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { empleado, mesDesde, mesHasta } = req.body;
+    if (!empleado || !mesDesde || !mesHasta) {
+      return res.status(400).json({ error: "Falta el empleado o el rango de meses" });
+    }
+    const sueldos = loadSueldos()
+      .filter((s) => s.empleado === empleado && s.mes >= mesDesde && s.mes <= mesHasta)
+      .sort((a, b) => a.mes.localeCompare(b.mes));
+    const adelantos = loadAdelantos()
+      .filter((a) => a.empleado === empleado && a.fecha.slice(0, 7) >= mesDesde && a.fecha.slice(0, 7) <= mesHasta)
+      .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+    const nombreMes = (mesISO) => {
+      const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+      const [y, m] = mesISO.split("-");
+      return `${meses[parseInt(m, 10) - 1]} ${y}`;
+    };
+    const fmt = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    let texto = `📋 *RESUMEN DE SUELDO Y ADELANTOS*\n${empleado}\n`;
+    texto += `Período: ${nombreMes(mesDesde)}${mesDesde !== mesHasta ? ` a ${nombreMes(mesHasta)}` : ""}\n\n`;
+
+    texto += `💰 *SUELDO*\n`;
+    let totalSueldo = 0;
+    sueldos.forEach((s) => {
+      texto += `${nombreMes(s.mes)}: $${fmt(s.total)}\n`;
+      totalSueldo += s.total;
+    });
+    if (sueldos.length === 0) texto += `(sin sueldo cargado en este período)\n`;
+    texto += `*Total sueldo: $${fmt(totalSueldo)}*\n\n`;
+
+    texto += `💵 *ADELANTOS RECIBIDOS*\n`;
+    let totalAdelantos = 0;
+    adelantos.forEach((a) => {
+      const [y, m, d] = a.fecha.split("-");
+      const medio = a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago";
+      texto += `${d}/${m} - $${fmt(a.monto)} (${medio})\n`;
+      totalAdelantos += a.monto;
+    });
+    if (adelantos.length === 0) texto += `(sin adelantos cargados en este período)\n`;
+    texto += `*Total adelantos: $${fmt(totalAdelantos)}*\n\n`;
+
+    const saldo = totalSueldo - totalAdelantos;
+    texto += `✅ *SALDO*\n`;
+    texto += saldo >= 0 ? `A favor del empleado: $${fmt(saldo)}` : `A favor de Chaparrita: $${fmt(Math.abs(saldo))}`;
+
+    res.json({ ok: true, texto, totalSueldo, totalAdelantos, saldo });
+  } catch (err) {
+    console.error("Error armando resumen de empleado:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Chaparrita - Adelantos de sueldo</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .form-adelanto { display: grid; gap: 10px; max-width: 420px; margin-bottom: 28px; }
+      .form-adelanto label { font-size: 12.5px; color: var(--texto-tenue); }
+      .empleado-card { margin-bottom: 18px; }
+      .empleado-card h3 { margin: 0 0 4px; font-size: 16px; }
+      .saldo-linea { font-size: 13.5px; margin: 2px 0; }
+      .saldo-total { font-weight: 700; font-size: 15px; margin-top: 6px; }
+      table.tabla-adelantos { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+      table.tabla-adelantos th { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--borde); color: var(--texto-tenue); font-weight: 600; }
+      table.tabla-adelantos td { padding: 5px 6px; border-bottom: 1px solid var(--borde); }
+      .saldado { opacity: 0.5; text-decoration: line-through; }
+      .filtro-mes { margin-bottom: 18px; }
+      .filtro-mes select { width: auto; margin-top: 0; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor" style="max-width:820px">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>💵 Adelantos de sueldo</h1>',
+    '<p class="sub">Cargá cada adelanto (efectivo o Mercadopago) apenas lo hagas. Acá abajo vas a ver siempre cuánto le tenés que descontar a cada empleado en el próximo sueldo.</p>',
+
+    '<h2>Cargar un adelanto</h2>',
+    '<div class="form-adelanto">',
+    '<div><label>Empleado</label><select id="fEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Fecha</label><input id="fFecha" type="date"></div>',
+    '<div><label>Monto</label><input id="fMonto" type="number" step="any" placeholder="$"></div>',
+    '<div><label>Medio</label><select id="fMedio"><option value="efectivo">Efectivo</option><option value="mercadopago">Mercadopago</option></select></div>',
+    '<div><label>Nota (opcional)</label><input id="fNota" type="text" placeholder="ej: adelanto de quincena"></div>',
+    '<button id="btnAgregar">Cargar adelanto</button>',
+    '<div id="msgForm" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Importar varios adelantos de una vez</h2>',
+    '<p class="sub" style="margin-top:-6px">Una línea por adelanto, formato: <code>fecha|monto|medio|nota</code> (medio: efectivo o mercadopago; nota es opcional). Ejemplo: <code>2026-06-05|61961.11|mercadopago|</code></p>',
+    '<div class="form-adelanto" style="max-width:520px">',
+    '<div><label>Empleado</label><select id="miEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Pegar líneas</label><textarea id="miTexto" rows="8" placeholder="2026-06-05|61961.11|mercadopago|\n2026-07-18|50000|efectivo|"></textarea></div>',
+    '<button id="btnImportarMasivo">Importar todo</button>',
+    '<div id="msgImportarMasivo" style="font-size:13px;white-space:pre-wrap"></div>',
+    '</div>',
+
+    '<h2>Detectar adelantos automáticamente</h2>',
+    '<p class="sub" style="margin-top:-6px">Pegá una conversación de WhatsApp exportada, o subí capturas de transferencias — Claude te propone los adelantos que encuentre, y vos elegís cuáles guardar. No se guarda nada solo.</p>',
+    '<div class="form-adelanto" style="max-width:520px">',
+    '<div><label>Empleado al que corresponden estos adelantos</label><select id="dEmpleado"><option value="">Elegí un empleado...</option></select></div>',
+    '<div><label>Subir el .zip o .txt que exportó WhatsApp (Menú del chat → Más → Exportar chat)</label><input id="dArchivo" type="file" accept=".zip,.txt"></div>',
+    '<div style="text-align:center;color:var(--texto-tenue);font-size:12px">— o —</div>',
+    '<div><label>Pegar el texto directamente</label><textarea id="dTexto" rows="5" placeholder="Pegá acá los mensajes relevantes"></textarea></div>',
+    '<button id="btnDetectarChat" class="secundario">Analizar chat</button>',
+    '<div><label>O subir capturas de transferencias (opcional, podés elegir varias)</label><input id="dCapturas" type="file" accept="image/*" multiple></div>',
+    '<button id="btnDetectarCapturas" class="secundario">Analizar capturas</button>',
+    '<div id="msgDetectar" style="font-size:13px"></div>',
+    '</div>',
+    '<div id="candidatosBox" style="display:none;margin-bottom:28px">',
+    '<table class="tabla-adelantos"><thead><tr><th></th><th>Fecha</th><th>Monto</th><th>Medio</th><th>Nota / origen</th></tr></thead><tbody id="tbodyCandidatos"></tbody></table>',
+    '<button id="btnGuardarCandidatos">Guardar seleccionados</button>',
+    '</div>',
+
+    '<h2>Resumen por empleado</h2>',
+    '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
+    '<div id="resumen">Cargando...</div>',
+
+    '<script>',
+    'var TODOS = []; var EMPLEADOS = [];',
+    'function hoyISO(){ var d=new Date(); return d.toISOString().slice(0,10); }',
+    'document.getElementById("fFecha").value = hoyISO();',
+    '',
+    'function mesDe(fechaISO){ return (fechaISO||"").slice(0,7); }', // "YYYY-MM"
+    'function nombreMes(mesISO){',
+    '  var partes = mesISO.split("-"); var meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];',
+    '  return meses[parseInt(partes[1],10)-1] + " " + partes[0];',
+    '}',
+    '',
+    'function pintarFiltroMes(){',
+    '  var select = document.getElementById("filtroMes");',
+    '  var mesesUnicos = Array.from(new Set(TODOS.map(function(a){ return mesDe(a.fecha); }))).sort().reverse();',
+    '  var mesActual = mesDe(hoyISO());',
+    '  if (mesesUnicos.indexOf(mesActual) === -1) mesesUnicos.unshift(mesActual);',
+    '  select.innerHTML = "";',
+    '  mesesUnicos.forEach(function(m){',
+    '    var opt = document.createElement("option"); opt.value = m; opt.textContent = nombreMes(m);',
+    '    select.appendChild(opt);',
+    '  });',
+    '  select.value = mesActual;',
+    '}',
+    '',
+    'function pintarSelectEmpleado(){',
+    '  ["fEmpleado", "dEmpleado", "miEmpleado"].forEach(function(idSelect){',
+    '    var select = document.getElementById(idSelect);',
+    '    var valorActual = select.value;',
+    '    select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
+    '    EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '      var opt = document.createElement("option"); opt.value = e.nombre; opt.textContent = e.nombre;',
+    '      select.appendChild(opt);',
+    '    });',
+    '    select.value = valorActual;',
+    '  });',
+    '}',
+    '',
+    'function pintarResumen(){',
+    '  var mesElegido = document.getElementById("filtroMes").value;',
+    '  var delMes = TODOS.filter(function(a){ return mesDe(a.fecha) === mesElegido; });',
+    '  var porEmpleado = {};',
+    '  delMes.forEach(function(a){ (porEmpleado[a.empleado] = porEmpleado[a.empleado] || []).push(a); });',
+    '  var cont = document.getElementById("resumen");',
+    '  cont.innerHTML = "";',
+    '  var nombres = Object.keys(porEmpleado).sort();',
+    '  if (nombres.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">💵</div>No hay adelantos cargados este mes.</div>"; return; }',
+    '  nombres.forEach(function(nombre){',
+    '    var lista = porEmpleado[nombre];',
+    '    var pendientes = lista.filter(function(a){ return !a.saldado; });',
+    '    var totalEfectivo = pendientes.filter(function(a){ return a.medioPago === "efectivo"; }).reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '    var totalMP = pendientes.filter(function(a){ return a.medioPago === "mercadopago"; }).reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '    var totalGeneral = totalEfectivo + totalMP;',
+    '    var div = document.createElement("div");',
+    '    div.className = "card empleado-card";',
+    '    var html = "<h3>" + nombre + "</h3>" +',
+    '      "<div class=\\"saldo-linea\\">Efectivo pendiente: $" + totalEfectivo.toLocaleString("es-AR") + "</div>" +',
+    '      "<div class=\\"saldo-linea\\">Mercadopago pendiente: $" + totalMP.toLocaleString("es-AR") + "</div>" +',
+    '      "<div class=\\"saldo-total\\">Total a descontar: $" + totalGeneral.toLocaleString("es-AR") + "</div>";',
+    '    if (pendientes.length > 0) {',
+    '      html += "<button class=\\"secundario btn-saldar\\" data-nombre=\\"" + nombre + "\\" data-mes=\\"" + mesElegido + "\\">Marcar todo como saldado (ya descontado del sueldo)</button>";',
+    '    }',
+    '    html += "<table class=\\"tabla-adelantos\\"><thead><tr><th>Fecha</th><th>Monto</th><th>Medio</th><th>Nota</th><th></th></tr></thead><tbody>" +',
+    '      lista.map(function(a){',
+    '        return "<tr class=\\"" + (a.saldado ? "saldado" : "") + "\\"><td>" + a.fecha + "</td><td>$" + Number(a.monto).toLocaleString("es-AR") + "</td><td>" + (a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago") + "</td><td>" + (a.nota || "") + "</td><td><button class=\\"btn-danger btn-borrar\\" data-id=\\"" + a.id + "\\">✕</button></td></tr>";',
+    '      }).join("") + "</tbody></table>";',
+    '    div.innerHTML = html;',
+    '    cont.appendChild(div);',
+    '  });',
+    '  document.querySelectorAll(".btn-saldar").forEach(function(btn){',
+    '    btn.addEventListener("click", function(){',
+    '      if (!confirm("¿Confirmás que ya se descontó del sueldo de " + btn.dataset.nombre + "?")) return;',
+    '      fetch("/admin/adelantos-saldar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: btn.dataset.nombre, mes: btn.dataset.mes})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargarTodo(); });',
+    '    });',
+    '  });',
+    '  document.querySelectorAll(".btn-borrar").forEach(function(btn){',
+    '    btn.addEventListener("click", function(){',
+    '      if (!confirm("¿Borrar este adelanto?")) return;',
+    '      fetch("/admin/adelantos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargarTodo(); });',
+    '    });',
+    '  });',
+    '}',
+    '',
+    'function cargarTodo(){',
+    '  Promise.all([',
+    '    fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); }),',
+    '    fetch("/admin/empleados-nombres", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); })',
+    '  ]).then(function(res){',
+    '      TODOS = res[0]; EMPLEADOS = res[1];',
+    '      pintarFiltroMes();',
+    '      pintarSelectEmpleado();',
+    '      pintarResumen();',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("resumen").textContent = "Error: " + e.message; } });',
+    '}',
+    'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
+    'document.getElementById("btnAgregar").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("fEmpleado").value.trim();',
+    '  var fecha = document.getElementById("fFecha").value;',
+    '  var monto = parseFloat(document.getElementById("fMonto").value);',
+    '  var medioPago = document.getElementById("fMedio").value;',
+    '  var nota = document.getElementById("fNota").value.trim();',
+    '  var msg = document.getElementById("msgForm");',
+    '  if (!empleado || !fecha || !monto) { msg.textContent = "Completá empleado, fecha y monto."; return; }',
+    '  fetch("/admin/adelantos-agregar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, fecha: fecha, monto: monto, medioPago: medioPago, nota: nota})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(){',
+    '      msg.textContent = "✅ Cargado.";',
+    '      document.getElementById("fMonto").value = "";',
+    '      document.getElementById("fNota").value = "";',
+    '      cargarTodo();',
+    '      setTimeout(function(){ msg.textContent = ""; }, 2000);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    'document.getElementById("btnImportarMasivo").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("miEmpleado").value;',
+    '  var texto = document.getElementById("miTexto").value;',
+    '  var msg = document.getElementById("msgImportarMasivo");',
+    '  if (!empleado || !texto.trim()) { msg.textContent = "Elegí el empleado y pegá al menos una línea."; return; }',
+    '  fetch("/admin/adelantos-importar-masivo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, texto: texto})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var m = "✅ Se importaron " + data.agregados + " adelanto(s).";',
+    '      if (data.errores && data.errores.length > 0) { m += "\\n⚠️ Líneas con problema:\\n" + data.errores.join("\\n"); }',
+    '      msg.textContent = m;',
+    '      document.getElementById("miTexto").value = "";',
+    '      cargarTodo();',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    '// ---- Detección automática (chat / capturas) ----',
+    'function pintarCandidatos(candidatos){',
+    '  var tbody = document.getElementById("tbodyCandidatos");',
+    '  tbody.innerHTML = "";',
+    '  if (candidatos.length === 0) {',
+    '    document.getElementById("msgDetectar").textContent = "No se encontró ningún adelanto reconocible.";',
+    '    document.getElementById("candidatosBox").style.display = "none";',
+    '    return;',
+    '  }',
+    '  candidatos.forEach(function(c){',
+    '    var tr = document.createElement("tr");',
+    '    var tdCheck = document.createElement("td");',
+    '    var chk = document.createElement("input"); chk.type = "checkbox"; chk.checked = true; chk.style.marginTop = "0";',
+    '    tdCheck.appendChild(chk);',
+    '    var tdFecha = document.createElement("td");',
+    '    var inpFecha = document.createElement("input"); inpFecha.type = "date"; inpFecha.value = c.fecha || hoyISO(); inpFecha.style.marginTop = "0"; inpFecha.style.padding = "4px";',
+    '    tdFecha.appendChild(inpFecha);',
+    '    var tdMonto = document.createElement("td");',
+    '    var inpMonto = document.createElement("input"); inpMonto.type = "number"; inpMonto.value = c.monto || ""; inpMonto.style.marginTop = "0"; inpMonto.style.width = "90px"; inpMonto.style.padding = "4px";',
+    '    tdMonto.appendChild(inpMonto);',
+    '    var tdMedio = document.createElement("td");',
+    '    var selMedio = document.createElement("select"); selMedio.style.marginTop = "0"; selMedio.style.padding = "4px";',
+    '    ["efectivo","mercadopago"].forEach(function(m){ var opt = document.createElement("option"); opt.value = m; opt.textContent = m === "efectivo" ? "Efectivo" : "Mercadopago"; if ((c.medioPago||"").indexOf(m) === 0 || (m === "mercadopago" && (c.medioPago||"").indexOf("mercado") === 0)) opt.selected = true; selMedio.appendChild(opt); });',
+    '    tdMedio.appendChild(selMedio);',
+    '    var tdNota = document.createElement("td");',
+    '    tdNota.style.fontSize = "11.5px"; tdNota.style.color = "var(--texto-tenue)";',
+    '    tdNota.textContent = c.nota || c.advertencia || (c.destinatario ? ("Para: " + c.destinatario) : "");',
+    '    tr.appendChild(tdCheck); tr.appendChild(tdFecha); tr.appendChild(tdMonto); tr.appendChild(tdMedio); tr.appendChild(tdNota);',
+    '    tr._candidato = { chk: chk, fecha: inpFecha, monto: inpMonto, medio: selMedio, nota: c.nota || c.advertencia || "" };',
+    '    tbody.appendChild(tr);',
+    '  });',
+    '  document.getElementById("candidatosBox").style.display = "block";',
+    '  document.getElementById("candidatosBox").scrollIntoView({behavior:"smooth", block:"center"});',
+    '}',
+    'document.getElementById("btnDetectarChat").addEventListener("click", function(){',
+    '  var texto = document.getElementById("dTexto").value;',
+    '  var archivo = document.getElementById("dArchivo").files[0];',
+    '  var msg = document.getElementById("msgDetectar");',
+    '  if (!texto.trim() && !archivo) { msg.textContent = "Pegá el texto, o subí el .zip/.txt exportado."; return; }',
+    '  msg.textContent = "Analizando con Claude...";',
+    '  var opciones;',
+    '  if (archivo) {',
+    '    var fd = new FormData();',
+    '    fd.append("archivoChat", archivo);',
+    '    if (texto.trim()) fd.append("texto", texto);',
+    '    opciones = { method: "POST", body: fd };',
+    '  } else {',
+    '    opciones = { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({texto: texto}) };',
+    '  }',
+    '  fetch("/admin/adelantos-detectar-chat", opciones)',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = data.candidatos.length + " candidato(s) encontrado(s). Revisá y confirmá abajo.";',
+    '      pintarCandidatos(data.candidatos);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnDetectarCapturas").addEventListener("click", function(){',
+    '  var input = document.getElementById("dCapturas");',
+    '  var msg = document.getElementById("msgDetectar");',
+    '  if (!input.files || input.files.length === 0) { msg.textContent = "Elegí al menos una captura primero."; return; }',
+    '  var fd = new FormData();',
+    '  for (var i = 0; i < input.files.length; i++) fd.append("capturas", input.files[i]);',
+    '  msg.textContent = "Leyendo capturas con Claude...";',
+    '  fetch("/admin/adelantos-detectar-captura", {method:"POST", body: fd})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = data.candidatos.length + " captura(s) leída(s). Revisá y confirmá abajo.";',
+    '      pintarCandidatos(data.candidatos);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnGuardarCandidatos").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("dEmpleado").value;',
+    '  var msg = document.getElementById("msgDetectar");',
+    '  if (!empleado) { msg.textContent = "Elegí a qué empleado corresponden estos adelantos, arriba."; return; }',
+    '  var items = [];',
+    '  document.querySelectorAll("#tbodyCandidatos tr").forEach(function(tr){',
+    '    var c = tr._candidato;',
+    '    if (!c.chk.checked) return;',
+    '    items.push({ empleado: empleado, fecha: c.fecha.value, monto: parseFloat(c.monto.value), medioPago: c.medio.value, nota: c.nota });',
+    '  });',
+    '  if (items.length === 0) { msg.textContent = "No dejaste ningún candidato tildado."; return; }',
+    '  fetch("/admin/adelantos-detectar-guardar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({items: items})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = "✅ Se guardaron " + data.agregados + " adelanto(s).";',
+    '      document.getElementById("candidatosBox").style.display = "none";',
+    '      document.getElementById("dTexto").value = "";',
+    '      document.getElementById("dCapturas").value = "";',
+    '      cargarTodo();',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    '',
+    'cargarTodo();',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/adelantos-data", requireAdminApi, (_req, res) => {
+  res.json(loadAdelantos());
+});
+
+app.post("/admin/adelantos-agregar", requireAdminApi, (req, res) => {
+  try {
+    const { empleado, fecha, monto, medioPago, nota } = req.body;
+    if (!empleado || !fecha || !monto || !["efectivo", "mercadopago"].includes(medioPago)) {
+      return res.status(400).json({ error: "Faltan datos o el medio de pago no es válido" });
+    }
+    const lista = loadAdelantos();
+    lista.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      empleado: String(empleado).trim(),
+      fecha,
+      monto: Number(monto),
+      medioPago,
+      nota: nota ? String(nota).trim() : "",
+      saldado: false,
+      creadoEn: new Date().toISOString(),
+    });
+    saveAdelantos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error agregando adelanto:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+// Carga varios adelantos de una sola vez, pegando texto en vez de tipear cada fila a mano.
+// Formato esperado, una línea por adelanto: fecha|monto|medio|nota (nota es opcional)
+// Ejemplo: 2026-06-05|61961.11|mercadopago|
+//          2026-07-18|50000|efectivo|
+app.post("/admin/adelantos-importar-masivo", requireAdminApi, (req, res) => {
+  try {
+    const { empleado, texto } = req.body;
+    if (!empleado || !texto || !texto.trim()) {
+      return res.status(400).json({ error: "Falta el empleado o el texto a importar" });
+    }
+    const lineas = texto.split("\n").map((l) => l.trim()).filter(Boolean);
+    const lista = loadAdelantos();
+    let agregados = 0;
+    const errores = [];
+    lineas.forEach((linea, idx) => {
+      const partes = linea.split("|").map((p) => p.trim());
+      const [fecha, montoTexto, medioPago, nota] = partes;
+      const monto = Number(montoTexto);
+      if (!fecha || !monto || !["efectivo", "mercadopago"].includes(medioPago)) {
+        errores.push(`Línea ${idx + 1}: "${linea}" — no se pudo interpretar (formato: fecha|monto|medio|nota)`);
+        return;
+      }
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + idx,
+        empleado: String(empleado).trim(),
+        fecha,
+        monto,
+        medioPago,
+        nota: nota ? nota.trim() : "",
+        saldado: false,
+        creadoEn: new Date().toISOString(),
+      });
+      agregados++;
+    });
+    saveAdelantos(lista);
+    res.json({ ok: true, agregados, errores });
+  } catch (err) {
+    console.error("Error importando adelantos en masa:", err);
+    res.status(500).json({ error: "No se pudo importar" });
+  }
+});
+
+app.post("/admin/adelantos-borrar", requireAdminApi, (req, res) => {
+  try {
+    const { id } = req.body;
+    const lista = loadAdelantos().filter((a) => a.id !== id);
+    saveAdelantos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error borrando adelanto:", err);
+    res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
+app.post("/admin/adelantos-saldar", requireAdminApi, (req, res) => {
+  try {
+    const { empleado, mes } = req.body;
+    if (!empleado || !mes) return res.status(400).json({ error: "Falta empleado o mes" });
+    const lista = loadAdelantos();
+    lista.forEach((a) => {
+      if (a.empleado === empleado && a.fecha.slice(0, 7) === mes && !a.saldado) {
+        a.saldado = true;
+        a.saldadoEn = new Date().toISOString();
+      }
+    });
+    saveAdelantos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error saldando adelantos:", err);
+    res.status(500).json({ error: "No se pudo actualizar" });
+  }
+});
+
+// ---- Detección asistida de adelantos: a partir de texto de chat (export de WhatsApp,
+//      pegado tal cual) o de capturas de transferencias. En los dos casos Claude devuelve
+//      CANDIDATOS — nada se guarda como adelanto real hasta que el usuario los revise y
+//      confirme desde /admin/adelantos-detectar-guardar. ----
+const DETECTAR_ADELANTOS_CHAT_PROMPT = `Sos un asistente que revisa una conversación de WhatsApp exportada entre el dueño de un restaurante y un empleado, buscando menciones de ADELANTOS DE SUELDO (plata que el dueño le adelantó al empleado, en efectivo o por Mercadopago/transferencia).
+
+Buscá frases como "te mando $X", "te adelanto", "te presto", "te transferí", "toma $X", con un monto en pesos y (si se puede inferir) una fecha. NO cuentes cosas que no sean claramente un adelanto de plata (charlas normales, pedidos de mercadería, pagos a proveedores, etc. no cuentan).
+
+Para cada adelanto que encuentres, indicá si por el contexto del mensaje parece haber sido en efectivo o por Mercadopago/transferencia (si no está claro, usá "efectivo" como valor por defecto, pero avisá la incertidumbre en la nota).
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"candidatos": [{"fecha": "YYYY-MM-DD si se puede inferir, si no dejar vacío", "monto": 5000, "medioPago": "efectivo o mercadopago", "nota": "fragmento o resumen breve del mensaje que lo justifica"}]}`;
+
+const DETECTAR_ADELANTOS_CAPTURA_PROMPT = `Sos un asistente que lee una captura de pantalla de una transferencia (de Mercadopago, de un banco, o similar) para registrar un adelanto de sueldo a un empleado. Extraé los datos reales que se vean, sin inventar nada.
+
+Respondé ÚNICAMENTE con un JSON válido (sin texto extra, sin bloques de código markdown), con esta forma exacta:
+{"fecha": "YYYY-MM-DD si se ve", "monto": 5000, "destinatario": "nombre del destinatario tal como figura, si se ve", "medioPago": "mercadopago", "advertencia": "si algo no se ve claro, contalo acá; si no, dejalo vacío"}`;
+
+app.post("/admin/adelantos-detectar-chat", requireAdminApi, upload.single("archivoChat"), async (req, res) => {
+  try {
+    let texto = req.body.texto || "";
+    // Si vino un archivo (en vez de, o además de, texto pegado): puede ser un .zip (lo que
+    // exporta WhatsApp normalmente, con el .txt del chat adentro — a veces también fotos,
+    // que ignoramos) o directamente un .txt.
+    if (req.file) {
+      if (req.file.originalname.toLowerCase().endsWith(".zip") || req.file.mimetype === "application/zip") {
+        const zip = new AdmZip(req.file.buffer);
+        const entradaTxt = zip.getEntries().find((e) => e.entryName.toLowerCase().endsWith(".txt"));
+        if (!entradaTxt) {
+          return res.status(400).json({ error: "El .zip no tiene ningún archivo .txt adentro — ¿es realmente la exportación del chat?" });
+        }
+        texto = entradaTxt.getData().toString("utf8");
+      } else {
+        texto = req.file.buffer.toString("utf8");
+      }
+    }
+    if (!texto || !texto.trim()) return res.status(400).json({ error: "Falta el texto del chat (pegalo, o subí el .zip/.txt exportado)" });
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 3000,
+        system: DETECTAR_ADELANTOS_CHAT_PROMPT,
+        messages: [{ role: "user", content: texto.slice(0, 60000) }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Error de la API de Claude al detectar adelantos en chat:", data);
+      return res.status(502).json({ error: "Error consultando a Claude" });
+    }
+    const textoRespuesta = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n").trim();
+    const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.json({ candidatos: [] });
+    const parsed = JSON.parse(jsonMatch[0]);
+    res.json({ candidatos: Array.isArray(parsed.candidatos) ? parsed.candidatos : [] });
+  } catch (err) {
+    console.error("Error detectando adelantos en chat:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/adelantos-detectar-captura", requireAdminApi, upload.array("capturas", 10), async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: "No se recibió ninguna captura" });
+    const candidatos = [];
+    for (const file of req.files) {
+      if (!file.mimetype.startsWith("image/")) continue;
+      const base64 = file.buffer.toString("base64");
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 800,
+          system: DETECTAR_ADELANTOS_CAPTURA_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image", source: { type: "base64", media_type: file.mimetype, data: base64 } },
+                { type: "text", text: "Extraé los datos de esta transferencia." },
+              ],
+            },
+          ],
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        console.error("Error de la API de Claude al leer captura de transferencia:", data);
+        continue;
+      }
+      const textoRespuesta = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n").trim();
+      const jsonMatch = textoRespuesta.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) continue;
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        candidatos.push(parsed);
+      } catch {
+        continue;
+      }
+    }
+    res.json({ candidatos });
+  } catch (err) {
+    console.error("Error detectando adelantos en capturas:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/adelantos-detectar-guardar", requireAdminApi, (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "No hay nada para guardar" });
+    const lista = loadAdelantos();
+    let agregados = 0;
+    for (const it of items) {
+      if (!it.empleado || !it.fecha || !it.monto || !["efectivo", "mercadopago"].includes(it.medioPago)) continue;
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+        empleado: String(it.empleado).trim(),
+        fecha: it.fecha,
+        monto: Number(it.monto),
+        medioPago: it.medioPago,
+        nota: it.nota ? String(it.nota).trim() : "(detectado automáticamente)",
+        saldado: false,
+        creadoEn: new Date().toISOString(),
+      });
+      agregados++;
+    }
+    saveAdelantos(lista);
+    res.json({ ok: true, agregados });
+  } catch (err) {
+    console.error("Error guardando adelantos detectados:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
 app.get("/admin/facturas", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -5033,10 +6336,18 @@ async function chequearComandasSinConfirmar() {
       if (cola.length === 0) continue;
       const masVieja = cola[0];
       if (ahora - masVieja.creadaEn >= QUINCE_MIN && !masVieja.recordatorioEnviado) {
-        const mensaje = masVieja.tipo === "reserva"
-          ? `¡Che! 👋 ¿Me confirmás que esta reserva ya quedó agendada?\n\n${masVieja.resumen}`
-          : `¡Che! 👋 ¿Me pasás el número de pedido y el link de FUDO de este pedido, para avisarle al cliente?\n\n${masVieja.resumen}`;
-        await sendWhatsappText(telefono, mensaje);
+        if (masVieja.tipo === "comanda_cocina") {
+          await sendWhatsappText(telefono, `¡Che! 👋 ¿Te llegó bien esta comanda impresa?\n\n${masVieja.resumen}`);
+          await sendWhatsappButtons(telefono, "¿Te llegó bien la comanda impresa?", [
+            { id: "comanda_recibida", titulo: "Sí, recibida ✅" },
+            { id: "comanda_no_recibida", titulo: "No, revisar 🖨️" },
+          ]);
+        } else {
+          await sendWhatsappText(telefono, `¡Che! 👋 ¿Me confirmás que esta reserva ya quedó agendada?\n\n${masVieja.resumen}`);
+          await sendWhatsappButtons(telefono, "¿Ya quedó agendada?", [
+            { id: "reserva_confirmada", titulo: "Sí, confirmado ✅" },
+          ]);
+        }
         masVieja.recordatorioEnviado = true;
         console.log(`Recordatorio de comanda sin confirmar enviado a ${telefono} (comanda ${masVieja.id}, tipo ${masVieja.tipo}).`);
       }
