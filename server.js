@@ -155,6 +155,41 @@ function saveFacturas(lista) {
   fs.writeFileSync(FACTURAS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
+// ---- Adelantos de sueldo a empleados (efectivo o Mercadopago) — para saber en todo
+// momento cuánto se le debe descontar a cada uno en el próximo sueldo. ----
+const ADELANTOS_PATH = path.join(DATA_DIR, "adelantos.json");
+function loadAdelantos() {
+  try {
+    return JSON.parse(fs.readFileSync(ADELANTOS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveAdelantos(lista) {
+  fs.writeFileSync(ADELANTOS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
+// ---- Sueldos mensuales por empleado. Dos tipos:
+//      "normal" — un solo monto, el que figura tal cual en su recibo (sirve también para
+//      empleados en negro, cargando el mismo número de referencia que un recibo formal).
+//      "mariano" — regla especial confirmada: tiene 4hs declaradas pero trabaja 8 (4 en
+//      blanco + 4 en negro), así que se toma el recibo declarado (que ya incluye el premio
+//      de feriado del contador si correspondió ese mes) DOS veces, más un tercer monto base
+//      fijo por su tarea de encargado de cocina (sin feriados/vacaciones adentro).
+//      Total = tipo "normal" -> montoRecibo
+//              tipo "mariano" -> (2 × montoRecibo) + montoBase
+const SUELDOS_PATH = path.join(DATA_DIR, "sueldos.json");
+function loadSueldos() {
+  try {
+    return JSON.parse(fs.readFileSync(SUELDOS_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+function saveSueldos(lista) {
+  fs.writeFileSync(SUELDOS_PATH, JSON.stringify(lista, null, 2), "utf8");
+}
+
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
 function loadMenuText() {
   try {
@@ -1384,6 +1419,7 @@ const {
   FUDO_API_KEY,
   FUDO_API_SECRET,
   ES_STAGING,
+  SUELDOS_PASSWORD,
   PORT = 3000,
 } = process.env;
 
@@ -1498,6 +1534,88 @@ app.post("/admin/login-check", (req, res) => {
 app.get("/admin/logout", (req, res) => {
   cerrarSesionAdmin(req, res);
   res.redirect("/admin/login");
+});
+
+// ==================== Segunda contraseña, solo para /admin/sueldos ====================
+// Datos de sueldos son más sensibles que el resto del panel, así que además de la
+// contraseña general de /admin, pide una segunda y propia para entrar acá.
+const SUELDOS_SESSIONS = new Map();
+const SUELDOS_SESSION_COOKIE = "chap_sueldos_sesion";
+const SUELDOS_SESSION_DURATION_MS = 4 * 60 * 60 * 1000; // 4hs — más corta que la general, a propósito
+
+function tieneSesionSueldosValida(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[SUELDOS_SESSION_COOKIE];
+  if (!token) return false;
+  const expira = SUELDOS_SESSIONS.get(token);
+  if (!expira || expira < Date.now()) {
+    SUELDOS_SESSIONS.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function crearSesionSueldos(res) {
+  const token = crypto.randomBytes(24).toString("hex");
+  SUELDOS_SESSIONS.set(token, Date.now() + SUELDOS_SESSION_DURATION_MS);
+  res.setHeader(
+    "Set-Cookie",
+    `${SUELDOS_SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SUELDOS_SESSION_DURATION_MS / 1000)}; SameSite=Lax`
+  );
+}
+
+// Middleware para la página HTML de /admin/sueldos: pide la sesión general de admin
+// (requireAdminPage ya se aplica antes) Y, encima, esta segunda sesión propia.
+function requireSueldosPage(req, res, next) {
+  if (tieneSesionSueldosValida(req)) return next();
+  return res.redirect("/admin/sueldos-login");
+}
+
+function requireSueldosApi(req, res, next) {
+  if (tieneSesionSueldosValida(req)) return next();
+  return res.status(401).json({ error: "Sesión de sueldos vencida, iniciá sesión de nuevo." });
+}
+
+app.get("/admin/sueldos-login", requireAdminPage, (_req, res) => {
+  res.type("html").send([
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Chaparrita - Sueldos</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .login-shell { max-width: 380px; margin: 100px auto; text-align: center; padding: 0 20px; }
+      .login-icono { width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 18px; display: flex; align-items: center; justify-content: center; font-size: 30px; background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); box-shadow: var(--sombra); }
+      .login-shell input[type=password] { text-align: center; font-size: 16px; padding: 13px; }
+      .login-shell button { width: 100%; padding: 13px; font-size: 14.5px; }
+    </style>`,
+    '</head><body>',
+    '<div class="login-shell">',
+    '<div class="login-icono">🔒</div>',
+    '<h1>Sueldos</h1>',
+    '<p class="sub">Esta sección tiene una contraseña aparte de la del panel general.</p>',
+    '<input type="password" id="password" placeholder="Contraseña de sueldos" autofocus />',
+    '<button class="btn-primary" id="btnEntrar">Entrar</button>',
+    '<div id="msg"></div>',
+    '</div>',
+    '<script>',
+    'function intentarEntrar() {',
+    '  var pw = document.getElementById("password").value;',
+    '  fetch("/admin/sueldos-login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
+    '    .then(function(){ window.location.href = "/admin/sueldos"; })',
+    '    .catch(function(e){ document.getElementById("msg").textContent = e.message; document.getElementById("msg").className = "msg-error"; });',
+    '}',
+    'document.getElementById("btnEntrar").addEventListener("click", intentarEntrar);',
+    'document.getElementById("password").addEventListener("keydown", function(e){ if (e.key === "Enter") intentarEntrar(); });',
+    '</' + 'script>',
+    '</body></html>'
+  ].join("\n"));
+});
+
+app.post("/admin/sueldos-login-check", requireAdminApi, (req, res) => {
+  if (!SUELDOS_PASSWORD || req.body.password !== SUELDOS_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña incorrecta" });
+  }
+  crearSesionSueldos(res);
+  res.json({ ok: true });
 });
 
 // ==================== Verificación del webhook (Meta) ====================
@@ -2847,6 +2965,8 @@ app.get("/admin", requireAdminPage, (_req, res) => {
         { href: "/admin/listaespera", icono: "⏳", titulo: "Lista de espera de mesas", desc: "Clientes esperando lugar cuando el sector está lleno." },
         { href: "/admin/compras", icono: "🛒", titulo: "Lista de compras", desc: "Historial por día — tildá lo que ya compraste, agregá o editá ítems." },
         { href: "/admin/facturas", icono: "🧾", titulo: "Facturas de proveedores", desc: "Facturas leídas por foto, pendientes de cargar en FUDO." },
+        { href: "/admin/adelantos", icono: "💵", titulo: "Adelantos de sueldo", desc: "Registrá adelantos en efectivo o Mercadopago y mirá cuánto le debés a cada empleado." },
+        { href: "/admin/sueldos", icono: "🧾", titulo: "Sueldos mensuales", desc: "Cargá el sueldo de cada mes (con la regla especial de Mariano) y mirá el neto a pagar tras descontar adelantos." },
         { href: "/admin/fudo-stock", icono: "📦", titulo: "Stock, ingredientes y proveedores (FUDO)", desc: "Trae los datos reales de FUDO y permite corregirlos ahí mismo." },
         { href: "/admin/postulantes", icono: "📋", titulo: "Postulantes / CVs", desc: "Gente que dejó su CV, con puntaje automático." },
       ],
@@ -3772,6 +3892,442 @@ app.post("/admin/compras-agregar", requireAdminApi, (req, res) => {
 });
 
 // ==================== Panel de facturas de proveedores (mientras no hay API de FUDO) ====================
+app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Chaparrita - Sueldos mensuales</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .form-sueldo { display: grid; gap: 10px; max-width: 420px; margin-bottom: 28px; }
+      .form-sueldo label { font-size: 12.5px; color: var(--texto-tenue); }
+      .empleado-card { margin-bottom: 18px; }
+      .empleado-card h3 { margin: 0 0 4px; font-size: 16px; }
+      .linea { font-size: 13.5px; margin: 2px 0; }
+      .neto { font-weight: 700; font-size: 16px; margin-top: 6px; color: var(--verde-wa); }
+      .filtro-mes { margin-bottom: 18px; }
+      .filtro-mes select { width: auto; margin-top: 0; }
+      #camposMariano { display: none; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor" style="max-width:820px">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>🧾 Sueldos mensuales</h1>',
+    '<p class="sub">Cargá el sueldo de cada mes tal como figura en el recibo. Para Mariano, la app aplica su regla especial de cálculo automáticamente.</p>',
+
+    '<h2>Cargar sueldo del mes</h2>',
+    '<div class="form-sueldo">',
+    '<div><label>Empleado</label><input id="fEmpleado" type="text" list="listaEmpleadosSueldo" placeholder="Nombre del empleado"></div>',
+    '<datalist id="listaEmpleadosSueldo"></datalist>',
+    '<div><label>Mes</label><input id="fMes" type="month"></div>',
+    '<div><label>Tipo</label><select id="fTipo"><option value="normal">Normal (un solo recibo)</option><option value="mariano">Mariano (regla especial)</option></select></div>',
+    '<div id="campoNormal"><label>Monto del recibo (tal como figura)</label><input id="fMontoRecibo" type="number" step="any" placeholder="$"></div>',
+    '<div id="camposMariano">',
+    '<label>Monto del recibo de 4hs declarado (con feriado incluido si corresponde)</label><input id="fMontoDeclarado" type="number" step="any" placeholder="$">',
+    '<label>Monto base sin especiales (tarea de encargado)</label><input id="fMontoBase" type="number" step="any" placeholder="$">',
+    '</div>',
+    '<div id="totalPreview" style="font-weight:600"></div>',
+    '<button id="btnAgregar">Cargar sueldo</button>',
+    '<div id="msgForm" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Resumen por empleado (sueldo − adelantos pendientes)</h2>',
+    '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
+    '<div id="resumen">Cargando...</div>',
+
+    '<script>',
+    'var SUELDOS = []; var ADELANTOS = [];',
+    'function hoyMes(){ var d=new Date(); return d.toISOString().slice(0,7); }',
+    'document.getElementById("fMes").value = hoyMes();',
+    '',
+    'function nombreMes(mesISO){',
+    '  var partes = mesISO.split("-"); var meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];',
+    '  return meses[parseInt(partes[1],10)-1] + " " + partes[0];',
+    '}',
+    '',
+    'document.getElementById("fTipo").addEventListener("change", function(){',
+    '  var esMariano = this.value === "mariano";',
+    '  document.getElementById("campoNormal").style.display = esMariano ? "none" : "block";',
+    '  document.getElementById("camposMariano").style.display = esMariano ? "block" : "none";',
+    '  actualizarPreview();',
+    '});',
+    'function calcularTotal(tipo, montoRecibo, montoDeclarado, montoBase){',
+    '  if (tipo === "mariano") return (2 * (montoDeclarado||0)) + (montoBase||0);',
+    '  return montoRecibo||0;',
+    '}',
+    'function actualizarPreview(){',
+    '  var tipo = document.getElementById("fTipo").value;',
+    '  var total;',
+    '  if (tipo === "mariano") {',
+    '    total = calcularTotal(tipo, 0, parseFloat(document.getElementById("fMontoDeclarado").value)||0, parseFloat(document.getElementById("fMontoBase").value)||0);',
+    '  } else {',
+    '    total = calcularTotal(tipo, parseFloat(document.getElementById("fMontoRecibo").value)||0, 0, 0);',
+    '  }',
+    '  document.getElementById("totalPreview").textContent = "Total del mes: $" + total.toLocaleString("es-AR");',
+    '}',
+    '["fMontoRecibo","fMontoDeclarado","fMontoBase"].forEach(function(id){ document.getElementById(id).addEventListener("input", actualizarPreview); });',
+    '',
+    'function pintarFiltroMes(){',
+    '  var select = document.getElementById("filtroMes");',
+    '  var mesesUnicos = Array.from(new Set(SUELDOS.map(function(s){ return s.mes; }).concat(ADELANTOS.map(function(a){ return a.fecha.slice(0,7); })))).sort().reverse();',
+    '  var mesActual = hoyMes();',
+    '  if (mesesUnicos.indexOf(mesActual) === -1) mesesUnicos.unshift(mesActual);',
+    '  select.innerHTML = "";',
+    '  mesesUnicos.forEach(function(m){ var opt = document.createElement("option"); opt.value = m; opt.textContent = nombreMes(m); select.appendChild(opt); });',
+    '  select.value = mesActual;',
+    '}',
+    '',
+    'function pintarDatalist(){',
+    '  var dl = document.getElementById("listaEmpleadosSueldo");',
+    '  dl.innerHTML = "";',
+    '  var nombres = Array.from(new Set(SUELDOS.map(function(s){ return s.empleado; }).concat(ADELANTOS.map(function(a){ return a.empleado; })))).sort();',
+    '  nombres.forEach(function(n){ var opt = document.createElement("option"); opt.value = n; dl.appendChild(opt); });',
+    '}',
+    '',
+    'function pintarResumen(){',
+    '  var mesElegido = document.getElementById("filtroMes").value;',
+    '  var sueldosDelMes = SUELDOS.filter(function(s){ return s.mes === mesElegido; });',
+    '  var nombres = Array.from(new Set(sueldosDelMes.map(function(s){ return s.empleado; }))).sort();',
+    '  var cont = document.getElementById("resumen");',
+    '  cont.innerHTML = "";',
+    '  if (nombres.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🧾</div>No hay sueldos cargados este mes.</div>"; return; }',
+    '  nombres.forEach(function(nombre){',
+    '    var sueldo = sueldosDelMes.filter(function(s){ return s.empleado === nombre; }).slice(-1)[0];',
+    '    var adelantosPendientes = ADELANTOS.filter(function(a){ return a.empleado === nombre && a.fecha.slice(0,7) === mesElegido && !a.saldado; });',
+    '    var totalAdelantos = adelantosPendientes.reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '    var neto = sueldo.total - totalAdelantos;',
+    '    var div = document.createElement("div");',
+    '    div.className = "card empleado-card";',
+    '    var detalle = sueldo.tipo === "mariano"',
+    '      ? "(2 × $" + Number(sueldo.montoDeclarado).toLocaleString("es-AR") + ") + $" + Number(sueldo.montoBase).toLocaleString("es-AR")',
+    '      : "Recibo: $" + Number(sueldo.montoRecibo).toLocaleString("es-AR");',
+    '    div.innerHTML = "<h3>" + nombre + "</h3>" +',
+    '      "<div class=\\"linea\\">Sueldo del mes: $" + sueldo.total.toLocaleString("es-AR") + " <span style=\\"color:var(--texto-tenue)\\">(" + detalle + ")</span></div>" +',
+    '      "<div class=\\"linea\\">Adelantos pendientes: -$" + totalAdelantos.toLocaleString("es-AR") + "</div>" +',
+    '      "<div class=\\"neto\\">Neto a pagar: $" + neto.toLocaleString("es-AR") + "</div>" +',
+    '      "<button class=\\"btn-danger\\" data-id=\\"" + sueldo.id + "\\">✕ Borrar este sueldo cargado</button>";',
+    '    cont.appendChild(div);',
+    '  });',
+    '  document.querySelectorAll(".btn-danger").forEach(function(btn){',
+    '    btn.addEventListener("click", function(){',
+    '      if (!confirm("¿Borrar este sueldo cargado?")) return;',
+    '      fetch("/admin/sueldos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargarTodo(); });',
+    '    });',
+    '  });',
+    '}',
+    '',
+    'function cargarTodo(){',
+    '  Promise.all([',
+    '    fetch("/admin/sueldos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); }),',
+    '    fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); })',
+    '  ]).then(function(res){',
+    '    SUELDOS = res[0]; ADELANTOS = res[1];',
+    '    pintarFiltroMes(); pintarDatalist(); pintarResumen();',
+    '  }).catch(function(e){ document.getElementById("resumen").textContent = "Error: " + e.message; });',
+    '}',
+    'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
+    'document.getElementById("btnAgregar").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("fEmpleado").value.trim();',
+    '  var mes = document.getElementById("fMes").value;',
+    '  var tipo = document.getElementById("fTipo").value;',
+    '  var msg = document.getElementById("msgForm");',
+    '  if (!empleado || !mes) { msg.textContent = "Completá empleado y mes."; return; }',
+    '  var body = { empleado: empleado, mes: mes, tipo: tipo };',
+    '  if (tipo === "mariano") {',
+    '    body.montoDeclarado = parseFloat(document.getElementById("fMontoDeclarado").value);',
+    '    body.montoBase = parseFloat(document.getElementById("fMontoBase").value);',
+    '    if (!body.montoDeclarado || !body.montoBase) { msg.textContent = "Completá los dos montos de Mariano."; return; }',
+    '  } else {',
+    '    body.montoRecibo = parseFloat(document.getElementById("fMontoRecibo").value);',
+    '    if (!body.montoRecibo) { msg.textContent = "Completá el monto del recibo."; return; }',
+    '  }',
+    '  fetch("/admin/sueldos-agregar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      msg.textContent = "✅ Cargado.";',
+    '      cargarTodo();',
+    '      setTimeout(function(){ msg.textContent = ""; }, 2000);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'cargarTodo();',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/sueldos-data", requireAdminApi, requireSueldosApi, (_req, res) => {
+  res.json(loadSueldos());
+});
+
+app.post("/admin/sueldos-agregar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { empleado, mes, tipo, montoRecibo, montoDeclarado, montoBase } = req.body;
+    if (!empleado || !mes || !["normal", "mariano"].includes(tipo)) {
+      return res.status(400).json({ error: "Faltan datos o el tipo no es válido" });
+    }
+    let total, registro;
+    if (tipo === "mariano") {
+      if (!montoDeclarado || !montoBase) return res.status(400).json({ error: "Faltan los montos de Mariano" });
+      total = 2 * Number(montoDeclarado) + Number(montoBase);
+      registro = { montoDeclarado: Number(montoDeclarado), montoBase: Number(montoBase) };
+    } else {
+      if (!montoRecibo) return res.status(400).json({ error: "Falta el monto del recibo" });
+      total = Number(montoRecibo);
+      registro = { montoRecibo: Number(montoRecibo) };
+    }
+    const lista = loadSueldos();
+    lista.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      empleado: String(empleado).trim(),
+      mes,
+      tipo,
+      ...registro,
+      total,
+      creadoEn: new Date().toISOString(),
+    });
+    saveSueldos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error agregando sueldo:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/sueldos-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { id } = req.body;
+    const lista = loadSueldos().filter((s) => s.id !== id);
+    saveSueldos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error borrando sueldo:", err);
+    res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
+app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
+  const html = [
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Chaparrita - Adelantos de sueldo</title>',
+    `<style>${ADMIN_BASE_CSS}
+      .form-adelanto { display: grid; gap: 10px; max-width: 420px; margin-bottom: 28px; }
+      .form-adelanto label { font-size: 12.5px; color: var(--texto-tenue); }
+      .empleado-card { margin-bottom: 18px; }
+      .empleado-card h3 { margin: 0 0 4px; font-size: 16px; }
+      .saldo-linea { font-size: 13.5px; margin: 2px 0; }
+      .saldo-total { font-weight: 700; font-size: 15px; margin-top: 6px; }
+      table.tabla-adelantos { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+      table.tabla-adelantos th { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--borde); color: var(--texto-tenue); font-weight: 600; }
+      table.tabla-adelantos td { padding: 5px 6px; border-bottom: 1px solid var(--borde); }
+      .saldado { opacity: 0.5; text-decoration: line-through; }
+      .filtro-mes { margin-bottom: 18px; }
+      .filtro-mes select { width: auto; margin-top: 0; }
+    </style>`,
+    '</head><body>',
+    '<div class="contenedor" style="max-width:820px">',
+    '<a class="volver" href="/admin">← Volver al panel</a>',
+    '<h1>💵 Adelantos de sueldo</h1>',
+    '<p class="sub">Cargá cada adelanto (efectivo o Mercadopago) apenas lo hagas. Acá abajo vas a ver siempre cuánto le tenés que descontar a cada empleado en el próximo sueldo.</p>',
+
+    '<h2>Cargar un adelanto</h2>',
+    '<div class="form-adelanto">',
+    '<div><label>Empleado</label><input id="fEmpleado" type="text" list="listaEmpleados" placeholder="Nombre del empleado"></div>',
+    '<datalist id="listaEmpleados"></datalist>',
+    '<div><label>Fecha</label><input id="fFecha" type="date"></div>',
+    '<div><label>Monto</label><input id="fMonto" type="number" step="any" placeholder="$"></div>',
+    '<div><label>Medio</label><select id="fMedio"><option value="efectivo">Efectivo</option><option value="mercadopago">Mercadopago</option></select></div>',
+    '<div><label>Nota (opcional)</label><input id="fNota" type="text" placeholder="ej: adelanto de quincena"></div>',
+    '<button id="btnAgregar">Cargar adelanto</button>',
+    '<div id="msgForm" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Resumen por empleado</h2>',
+    '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
+    '<div id="resumen">Cargando...</div>',
+
+    '<script>',
+    'var TODOS = [];',
+    'function hoyISO(){ var d=new Date(); return d.toISOString().slice(0,10); }',
+    'document.getElementById("fFecha").value = hoyISO();',
+    '',
+    'function mesDe(fechaISO){ return (fechaISO||"").slice(0,7); }', // "YYYY-MM"
+    'function nombreMes(mesISO){',
+    '  var partes = mesISO.split("-"); var meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];',
+    '  return meses[parseInt(partes[1],10)-1] + " " + partes[0];',
+    '}',
+    '',
+    'function pintarFiltroMes(){',
+    '  var select = document.getElementById("filtroMes");',
+    '  var mesesUnicos = Array.from(new Set(TODOS.map(function(a){ return mesDe(a.fecha); }))).sort().reverse();',
+    '  var mesActual = mesDe(hoyISO());',
+    '  if (mesesUnicos.indexOf(mesActual) === -1) mesesUnicos.unshift(mesActual);',
+    '  select.innerHTML = "";',
+    '  mesesUnicos.forEach(function(m){',
+    '    var opt = document.createElement("option"); opt.value = m; opt.textContent = nombreMes(m);',
+    '    select.appendChild(opt);',
+    '  });',
+    '  select.value = mesActual;',
+    '}',
+    '',
+    'function pintarDatalistEmpleados(){',
+    '  var dl = document.getElementById("listaEmpleados");',
+    '  dl.innerHTML = "";',
+    '  var nombres = Array.from(new Set(TODOS.map(function(a){ return a.empleado; }))).sort();',
+    '  nombres.forEach(function(n){ var opt = document.createElement("option"); opt.value = n; dl.appendChild(opt); });',
+    '}',
+    '',
+    'function pintarResumen(){',
+    '  var mesElegido = document.getElementById("filtroMes").value;',
+    '  var delMes = TODOS.filter(function(a){ return mesDe(a.fecha) === mesElegido; });',
+    '  var porEmpleado = {};',
+    '  delMes.forEach(function(a){ (porEmpleado[a.empleado] = porEmpleado[a.empleado] || []).push(a); });',
+    '  var cont = document.getElementById("resumen");',
+    '  cont.innerHTML = "";',
+    '  var nombres = Object.keys(porEmpleado).sort();',
+    '  if (nombres.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">💵</div>No hay adelantos cargados este mes.</div>"; return; }',
+    '  nombres.forEach(function(nombre){',
+    '    var lista = porEmpleado[nombre];',
+    '    var pendientes = lista.filter(function(a){ return !a.saldado; });',
+    '    var totalEfectivo = pendientes.filter(function(a){ return a.medioPago === "efectivo"; }).reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '    var totalMP = pendientes.filter(function(a){ return a.medioPago === "mercadopago"; }).reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '    var totalGeneral = totalEfectivo + totalMP;',
+    '    var div = document.createElement("div");',
+    '    div.className = "card empleado-card";',
+    '    var html = "<h3>" + nombre + "</h3>" +',
+    '      "<div class=\\"saldo-linea\\">Efectivo pendiente: $" + totalEfectivo.toLocaleString("es-AR") + "</div>" +',
+    '      "<div class=\\"saldo-linea\\">Mercadopago pendiente: $" + totalMP.toLocaleString("es-AR") + "</div>" +',
+    '      "<div class=\\"saldo-total\\">Total a descontar: $" + totalGeneral.toLocaleString("es-AR") + "</div>";',
+    '    if (pendientes.length > 0) {',
+    '      html += "<button class=\\"secundario btn-saldar\\" data-nombre=\\"" + nombre + "\\" data-mes=\\"" + mesElegido + "\\">Marcar todo como saldado (ya descontado del sueldo)</button>";',
+    '    }',
+    '    html += "<table class=\\"tabla-adelantos\\"><thead><tr><th>Fecha</th><th>Monto</th><th>Medio</th><th>Nota</th><th></th></tr></thead><tbody>" +',
+    '      lista.map(function(a){',
+    '        return "<tr class=\\"" + (a.saldado ? "saldado" : "") + "\\"><td>" + a.fecha + "</td><td>$" + Number(a.monto).toLocaleString("es-AR") + "</td><td>" + (a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago") + "</td><td>" + (a.nota || "") + "</td><td><button class=\\"btn-danger btn-borrar\\" data-id=\\"" + a.id + "\\">✕</button></td></tr>";',
+    '      }).join("") + "</tbody></table>";',
+    '    div.innerHTML = html;',
+    '    cont.appendChild(div);',
+    '  });',
+    '  document.querySelectorAll(".btn-saldar").forEach(function(btn){',
+    '    btn.addEventListener("click", function(){',
+    '      if (!confirm("¿Confirmás que ya se descontó del sueldo de " + btn.dataset.nombre + "?")) return;',
+    '      fetch("/admin/adelantos-saldar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: btn.dataset.nombre, mes: btn.dataset.mes})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargarTodo(); });',
+    '    });',
+    '  });',
+    '  document.querySelectorAll(".btn-borrar").forEach(function(btn){',
+    '    btn.addEventListener("click", function(){',
+    '      if (!confirm("¿Borrar este adelanto?")) return;',
+    '      fetch("/admin/adelantos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
+    '        .then(function(r){ return r.json(); })',
+    '        .then(function(){ cargarTodo(); });',
+    '    });',
+    '  });',
+    '}',
+    '',
+    'function cargarTodo(){',
+    '  fetch("/admin/adelantos-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
+    '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
+    '    .then(function(data){',
+    '      TODOS = data;',
+    '      pintarFiltroMes();',
+    '      pintarDatalistEmpleados();',
+    '      pintarResumen();',
+    '    })',
+    '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("resumen").textContent = "Error: " + e.message; } });',
+    '}',
+    'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
+    'document.getElementById("btnAgregar").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("fEmpleado").value.trim();',
+    '  var fecha = document.getElementById("fFecha").value;',
+    '  var monto = parseFloat(document.getElementById("fMonto").value);',
+    '  var medioPago = document.getElementById("fMedio").value;',
+    '  var nota = document.getElementById("fNota").value.trim();',
+    '  var msg = document.getElementById("msgForm");',
+    '  if (!empleado || !fecha || !monto) { msg.textContent = "Completá empleado, fecha y monto."; return; }',
+    '  fetch("/admin/adelantos-agregar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, fecha: fecha, monto: monto, medioPago: medioPago, nota: nota})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(){',
+    '      msg.textContent = "✅ Cargado.";',
+    '      document.getElementById("fMonto").value = "";',
+    '      document.getElementById("fNota").value = "";',
+    '      cargarTodo();',
+    '      setTimeout(function(){ msg.textContent = ""; }, 2000);',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'cargarTodo();',
+    '</' + 'script>',
+    '</div>',
+    '</body></html>'
+  ].join("\n");
+  res.type("html").send(html);
+});
+
+app.post("/admin/adelantos-data", requireAdminApi, (_req, res) => {
+  res.json(loadAdelantos());
+});
+
+app.post("/admin/adelantos-agregar", requireAdminApi, (req, res) => {
+  try {
+    const { empleado, fecha, monto, medioPago, nota } = req.body;
+    if (!empleado || !fecha || !monto || !["efectivo", "mercadopago"].includes(medioPago)) {
+      return res.status(400).json({ error: "Faltan datos o el medio de pago no es válido" });
+    }
+    const lista = loadAdelantos();
+    lista.push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      empleado: String(empleado).trim(),
+      fecha,
+      monto: Number(monto),
+      medioPago,
+      nota: nota ? String(nota).trim() : "",
+      saldado: false,
+      creadoEn: new Date().toISOString(),
+    });
+    saveAdelantos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error agregando adelanto:", err);
+    res.status(500).json({ error: "No se pudo guardar" });
+  }
+});
+
+app.post("/admin/adelantos-borrar", requireAdminApi, (req, res) => {
+  try {
+    const { id } = req.body;
+    const lista = loadAdelantos().filter((a) => a.id !== id);
+    saveAdelantos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error borrando adelanto:", err);
+    res.status(500).json({ error: "No se pudo borrar" });
+  }
+});
+
+app.post("/admin/adelantos-saldar", requireAdminApi, (req, res) => {
+  try {
+    const { empleado, mes } = req.body;
+    if (!empleado || !mes) return res.status(400).json({ error: "Falta empleado o mes" });
+    const lista = loadAdelantos();
+    lista.forEach((a) => {
+      if (a.empleado === empleado && a.fecha.slice(0, 7) === mes && !a.saldado) {
+        a.saldado = true;
+        a.saldadoEn = new Date().toISOString();
+      }
+    });
+    saveAdelantos(lista);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error saldando adelantos:", err);
+    res.status(500).json({ error: "No se pudo actualizar" });
+  }
+});
+
 app.get("/admin/facturas", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
