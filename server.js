@@ -1378,14 +1378,6 @@ const ADMIN_CONFIG_PAGE = [
   '  var tlpPrecioInput = numInput(tlp.precioPersona);',
   '  area.appendChild(field("Precio por persona", tlpPrecioInput));',
   '',
-  '  area.appendChild(el("h2", {text:"FUDO — carga automatica de pedidos", id:"sec-fudo-pedidos"}));',
-  '  area.appendChild(el("p", {text:"Apagar esto NO afecta el menu en vivo ni el stock — solo el paso de crear el pedido automaticamente en FUDO cuando un cliente confirma un pedido. Usalo para pruebas sin cargar pedidos de mentira al sistema real.", style:"font-size:12px;color:#6b6258;margin:2px 0 8px 0;"}));',
-  '  var chkPausarFudo = el("input", {type:"checkbox"});',
-  '  chkPausarFudo.checked = cfg.pausarPedidosAutomaticosFudo === true;',
-  '  var lblPausarFudo = el("label", {text:" Pausar la carga automatica de pedidos en FUDO (modo prueba)"});',
-  '  lblPausarFudo.style.display = "inline"; lblPausarFudo.style.fontWeight = "normal";',
-  '  area.appendChild(el("div", {class:"row"}, [el("span", {style:"display:inline-flex;align-items:center;"}, [chkPausarFudo, lblPausarFudo])]));',
-  '',
   '  area.appendChild(el("h2", {text:"Promociones por dia de la semana", id:"sec-promos-dia"}));',
   '  var promosDiaData = JSON.parse(JSON.stringify(cfg.promosDia));',
   '  var promosDiaBox = el("div", {id:"promosDiaBox"});',
@@ -1478,7 +1470,6 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.equipo = equipoList;',
   '    nuevo.grupoReservasWhatsappId = grupoInput.value;',
   '    nuevo.tacosLibresPublico = {dias: DIAS_KEY.filter(function(d){ return tlpDiasChecks[d].checked; }), precioPersona: Number(tlpPrecioInput.value)};',
-  '    nuevo.pausarPedidosAutomaticosFudo = chkPausarFudo.checked;',
   '    nuevo["ofertaCumplea\u00f1osProximo"] = {activo: ofertaCumpleActivo.checked, diasAntes: Number(ofertaCumpleDias.value)};',
   '    nuevo["cumplea\u00f1osCliente"] = {activo: cumpleCliActivo.checked, descuentoPorcentaje: Number(cumpleCliDesc.value), shotsTequilaSiFestejaEnLocal: cumpleCliShots.checked};',
   '    nuevo.avisoCumpleañosDiario = {activo: avisoCumpleActivo.checked, telefono: avisoCumpleTel.value, hora: avisoCumpleHora.value};',
@@ -6107,18 +6098,37 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
     '  <label class="toggle-switch"><input type="checkbox" id="chkToggle" /><span class="toggle-slider"></span></label>',
     '</div>',
     '<div id="msg">Cargando...</div>',
+
+    '<h1 style="margin-top:32px">📦 Pedidos automáticos a FUDO</h1>',
+    '<p class="sub">Apagar esto NO afecta el menú en vivo ni el stock — solo el paso de crear el pedido automáticamente en FUDO cuando un cliente confirma un pedido. Apagalo para pruebas, sin cargar pedidos de mentira al sistema real.</p>',
+    '<div class="card estado-card" id="estadoFudo" style="display:none">',
+    '  <div class="estado-info"><b id="estadoFudoTexto">...</b><span>Tocá el switch para cambiar</span></div>',
+    '  <label class="toggle-switch"><input type="checkbox" id="chkToggleFudo" /><span class="toggle-slider"></span></label>',
+    '</div>',
+    '<div id="msgFudo"></div>',
+
     '<script>',
     'var activo = null;',
+    'var fudoActivo = null;',
     'function pintar() {',
     '  var texto = document.getElementById("estadoTexto");',
     '  var chk = document.getElementById("chkToggle");',
     '  chk.checked = !!activo;',
     '  texto.textContent = activo ? "🟢 Asistente ENCENDIDO" : "🔴 Asistente APAGADO";',
     '}',
+    'function pintarFudo() {',
+    '  var texto = document.getElementById("estadoFudoTexto");',
+    '  var chk = document.getElementById("chkToggleFudo");',
+    '  chk.checked = !!fudoActivo;',
+    '  texto.textContent = fudoActivo ? "🟢 Carga automática ENCENDIDA" : "🔴 Carga automática PAUSADA (modo prueba)";',
+    '}',
     'function cargar() {',
     '  fetch("/admin/switch-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
-    '    .then(function(data){ activo = data.activo; pintar(); document.getElementById("estado").style.display = "flex"; document.getElementById("msg").textContent = ""; })',
+    '    .then(function(data){',
+    '      activo = data.activo; pintar(); document.getElementById("estado").style.display = "flex"; document.getElementById("msg").textContent = "";',
+    '      fudoActivo = !data.pausarPedidosAutomaticosFudo; pintarFudo(); document.getElementById("estadoFudo").style.display = "flex";',
+    '    })',
     '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
     '}',
     'cargar();',
@@ -6129,6 +6139,13 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
     '    .then(function(){ activo = nuevoValor; pintar(); document.getElementById("msg").textContent = "Listo, se guardó."; document.getElementById("msg").className = "msg-ok"; })',
     '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; });',
     '});',
+    'document.getElementById("chkToggleFudo").addEventListener("change", function() {',
+    '  var nuevoValor = this.checked;',
+    '  fetch("/admin/switch-fudo-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({activo: nuevoValor})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo guardar"); } return r.json(); })',
+    '    .then(function(){ fudoActivo = nuevoValor; pintarFudo(); document.getElementById("msgFudo").textContent = "Listo, se guardó."; document.getElementById("msgFudo").className = "msg-ok"; })',
+    '    .catch(function(e){ document.getElementById("msgFudo").textContent = "Error: " + e.message; document.getElementById("msgFudo").className = "msg-error"; });',
+    '});',
     '</' + 'script>',
     '</div>',
     '</body></html>'
@@ -6138,7 +6155,7 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
 
 app.post("/admin/switch-data", requireAdminApi, (req, res) => {
   const config = loadConfig();
-  res.json({ activo: config.asistenteActivo !== false });
+  res.json({ activo: config.asistenteActivo !== false, pausarPedidosAutomaticosFudo: config.pausarPedidosAutomaticosFudo === true });
 });
 
 app.post("/admin/switch-save", requireAdminApi, (req, res) => {
@@ -6147,6 +6164,14 @@ app.post("/admin/switch-save", requireAdminApi, (req, res) => {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
   console.log(`Asistente ${config.asistenteActivo ? "ENCENDIDO" : "APAGADO"} desde /admin/switch.`);
   res.json({ ok: true, activo: config.asistenteActivo });
+});
+
+app.post("/admin/switch-fudo-save", requireAdminApi, (req, res) => {
+  const config = loadConfig();
+  config.pausarPedidosAutomaticosFudo = !req.body.activo; // el switch muestra "encendido = carga", guardamos el booleano invertido (pausado)
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  console.log(`Carga automática de pedidos a FUDO ${config.pausarPedidosAutomaticosFudo ? "PAUSADA" : "ENCENDIDA"} desde /admin/switch.`);
+  res.json({ ok: true, pausarPedidosAutomaticosFudo: config.pausarPedidosAutomaticosFudo });
 });
 
 // ==================== Editor de configuración (precios, promos, teléfonos, horarios) ====================
