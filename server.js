@@ -2938,6 +2938,9 @@ function normalizarParaEnvioAR(numero) {
 // ==================== Envío de mensajes por WhatsApp ====================
 async function sendWhatsappText(to, body) {
   const destino = normalizarParaEnvioAR(to);
+  // Solo en staging (ES_STAGING=true): le agregamos un aviso arriba de TODOS los mensajes,
+  // para nunca confundir si te está contestando el bot de prueba o el real.
+  const bodyFinal = ES_STAGING === "true" ? `🧪 [PRUEBA — STAGING]\n${body}` : body;
   console.log(`Enviando mensaje a ${destino} (original: ${to}) vía WhatsApp (Phone Number ID: ${WHATSAPP_PHONE_NUMBER_ID})...`);
   try {
     const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
@@ -2950,7 +2953,7 @@ async function sendWhatsappText(to, body) {
         messaging_product: "whatsapp",
         to: destino,
         type: "text",
-        text: { body },
+        text: { body: bodyFinal },
       }),
     });
     const data = await response.json();
@@ -2973,6 +2976,7 @@ async function sendWhatsappText(to, body) {
 // así que el resto del bot no necesita saber que vino de un botón.
 async function sendWhatsappButtons(to, bodyText, botones) {
   const destino = normalizarParaEnvioAR(to);
+  const bodyTextFinal = ES_STAGING === "true" ? `🧪 [PRUEBA] ${bodyText}` : bodyText;
   const botonesRecortados = botones.slice(0, 3).map((b) => ({
     type: "reply",
     reply: { id: b.id, title: (b.titulo || "").slice(0, 20) },
@@ -2991,7 +2995,7 @@ async function sendWhatsappButtons(to, bodyText, botones) {
         type: "interactive",
         interactive: {
           type: "button",
-          body: { text: bodyText },
+          body: { text: bodyTextFinal },
           action: { buttons: botonesRecortados },
         },
       }),
@@ -3012,6 +3016,7 @@ async function sendWhatsappButtons(to, bodyText, botones) {
 // más de 3 alternativas). "secciones" es un array de {titulo, filas: [{id, titulo, desc}]}.
 async function sendWhatsappList(to, bodyText, textoBoton, secciones) {
   const destino = normalizarParaEnvioAR(to);
+  const bodyTextFinal = ES_STAGING === "true" ? `🧪 [PRUEBA] ${bodyText}` : bodyText;
   const seccionesFormateadas = secciones.map((s) => ({
     title: (s.titulo || "").slice(0, 24),
     rows: s.filas.slice(0, 10).map((f) => ({
@@ -3034,7 +3039,7 @@ async function sendWhatsappList(to, bodyText, textoBoton, secciones) {
         type: "interactive",
         interactive: {
           type: "list",
-          body: { text: bodyText },
+          body: { text: bodyTextFinal },
           action: { button: (textoBoton || "Elegir").slice(0, 20), sections: seccionesFormateadas },
         },
       }),
