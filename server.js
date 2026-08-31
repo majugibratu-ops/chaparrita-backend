@@ -775,7 +775,7 @@ async function categorizarPedidoIndividual(textoOriginal) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001", // tarea simple de clasificación — no hace falta Sonnet acá
         max_tokens: 1000,
         system: LISTA_COMPRAS_SYSTEM_PROMPT,
         messages: [{ role: "user", content: textoOriginal }],
@@ -2782,6 +2782,7 @@ async function downloadWhatsappMedia(mediaId) {
 
 // ==================== Llamada a la API de Claude ====================
 async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas) {
+  const promptPartes = buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas);
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -2792,7 +2793,14 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy,
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
-      system: buildSystemPrompt(config, menuText, promosHoy, diaHoy, fechaHoy, horaActual, perfilCliente, esDueño, esAdminReservas),
+      // El bloque "estatico" es idéntico en TODOS los mensajes de TODAS las conversaciones
+      // (mismo menú, mismas reglas) — con cache_control, Anthropic lo cachea y lo cobra mucho
+      // más barato a partir del segundo uso (dura 5 minutos, se renueva con cada uso). Solo el
+      // bloque "dinamico" (hora actual, perfil del cliente) se manda fresco cada vez.
+      system: [
+        { type: "text", text: promptPartes.estatico, cache_control: { type: "ephemeral" } },
+        { type: "text", text: promptPartes.dinamico },
+      ],
       messages: history,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
@@ -2802,6 +2810,13 @@ async function askClaude(history, config, menuText, promosHoy, diaHoy, fechaHoy,
   if (!response.ok) {
     console.error("Error de la API de Claude:", data);
     return "Uy, tuvimos un problemita técnico. En un rato te contesto, disculpá.";
+  }
+  if (data.usage) {
+    console.log(
+      `Uso de tokens — entrada: ${data.usage.input_tokens || 0}, caché creado: ${data.usage.cache_creation_input_tokens || 0}, caché leído (barato): ${
+        data.usage.cache_read_input_tokens || 0
+      }, salida: ${data.usage.output_tokens || 0}`
+    );
   }
 
   return (data.content || [])
@@ -3104,6 +3119,52 @@ async function sendWhatsappDocument(to, mediaId, caption, filename) {
   }
 }
 
+// A diferencia de sendWhatsappDocument (que reenvía un archivo que YA llegó por WhatsApp),
+// esta función sube un archivo NUEVO generado por nosotros (ej: un backup) y lo manda —
+// primero hay que subirlo a los servidores de Meta, y recién ahí se puede adjuntar a un
+// mensaje.
+async function subirYEnviarDocumentoWhatsapp(to, buffer, filename, mimetype, caption) {
+  const destino = normalizarParaEnvioAR(to);
+  try {
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("file", new Blob([buffer], { type: mimetype }), filename);
+    const subida = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/media`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      body: form,
+    });
+    const datosSubida = await subida.json();
+    if (!subida.ok || !datosSubida.id) {
+      console.error("ERROR al subir archivo a WhatsApp:", JSON.stringify(datosSubida));
+      return false;
+    }
+    const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: destino,
+        type: "document",
+        document: { id: datosSubida.id, caption, filename },
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("ERROR al enviar documento nuevo por WhatsApp:", JSON.stringify(data));
+      return false;
+    }
+    console.log(`Documento "${filename}" subido y enviado a ${destino} OK.`);
+    return true;
+  } catch (err) {
+    console.error("ERROR de red subiendo/enviando documento por WhatsApp:", err.message);
+    return false;
+  }
+}
+
 app.get("/", (_req, res) => res.send("Chaparrita agente — backend activo ✅"));
 
 // ==================== Panel de administración ====================
@@ -3227,7 +3288,23 @@ app.get("/admin", requireAdminPage, (_req, res) => {
         <div class="chap-hero">
           <h1>${tituloHero}</h1>
           <p>${subtituloHero}</p>
+          <button id="btnBackupAhora" class="secundario" style="margin-top:12px">📦 Hacer backup ahora</button>
+          <span id="msgBackup" style="margin-left:8px;font-size:13px"></span>
         </div>
+        <script>
+          document.getElementById("btnBackupAhora").addEventListener("click", function(){
+            var btn = this; var msg = document.getElementById("msgBackup");
+            btn.disabled = true; btn.textContent = "Mandando...";
+            fetch("/admin/backup-ahora", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})
+              .then(function(r){ return r.json(); })
+              .then(function(data){
+                btn.disabled = false; btn.textContent = "📦 Hacer backup ahora";
+                if (data.error) { msg.textContent = "❌ " + data.error; return; }
+                msg.textContent = "✅ Backup enviado por WhatsApp.";
+              })
+              .catch(function(e){ btn.disabled = false; btn.textContent = "📦 Hacer backup ahora"; msg.textContent = "❌ " + e.message; });
+          });
+        </script>
 
         ${seccionesHtml}
       </div>
@@ -6384,6 +6461,80 @@ async function chequearRecordatorios() {
 setInterval(chequearRecordatorios, 5 * 60 * 1000); // cada 5 minutos
 setTimeout(chequearRecordatorios, 15 * 1000); // y un primer chequeo a los 15seg de arrancar
 
+// ==================== Backup automático diario (por WhatsApp, al dueño) ====================
+// Comprime toda la carpeta de datos (config, reservas, adelantos, sueldos, facturas, etc.)
+// y se la manda como archivo al dueño por WhatsApp — así siempre hay una copia fuera del
+// volumen de Railway, sin necesidad de contratar ni configurar ningún storage externo.
+let ultimoBackupFecha = null; // "YYYY-MM-DD" del último backup ya enviado, para no mandarlo dos veces el mismo día
+const HORA_BACKUP_DIARIO = 5; // 5 de la madrugada, hora de Formosa — fuera del horario de atención
+
+async function hacerBackupYEnviarloPorWhatsapp() {
+  // En staging no tiene sentido mandar backups (son datos de prueba) — solo corre en el real.
+  if (ES_STAGING === "true") return;
+  try {
+    const config = loadConfig();
+    const dueño = equipoConPermiso(config, "esDueño")[0];
+    if (!dueño || !dueño.telefono) {
+      console.log("Backup diario: no hay ningún miembro del equipo marcado como dueño con teléfono cargado — se omite.");
+      return;
+    }
+    const zip = new AdmZip();
+    zip.addLocalFolder(DATA_DIR);
+    const buffer = zip.toBuffer();
+    const fechaHoy = new Date().toISOString().slice(0, 10);
+    const nombreArchivo = `backup-chaparrita-${fechaHoy}.zip`;
+    const enviado = await subirYEnviarDocumentoWhatsapp(
+      dueño.telefono,
+      buffer,
+      nombreArchivo,
+      "application/zip",
+      `📦 Backup automático del ${fechaHoy} — reservas, sueldos, adelantos, facturas y toda la configuración de Chaparrita.`
+    );
+    if (enviado) {
+      console.log(`Backup diario enviado a ${dueño.telefono} (${(buffer.length / 1024).toFixed(0)} KB).`);
+    } else {
+      console.error("Backup diario: falló el envío por WhatsApp.");
+    }
+  } catch (err) {
+    console.error("Error generando/enviando el backup diario:", err);
+  }
+}
+
+async function chequearBackupDiario() {
+  try {
+    const ahora = new Date();
+    const horaArgentina = new Date(ahora.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+    const fechaHoy = horaArgentina.toISOString().slice(0, 10);
+    if (ultimoBackupFecha === fechaHoy) return; // ya se mandó hoy
+    if (horaArgentina.getHours() < HORA_BACKUP_DIARIO) return; // todavía no es la hora
+    ultimoBackupFecha = fechaHoy;
+    await hacerBackupYEnviarloPorWhatsapp();
+  } catch (err) {
+    console.error("Error chequeando si toca backup diario:", err);
+  }
+}
+setInterval(chequearBackupDiario, 30 * 60 * 1000); // chequea cada 30 minutos si ya es la hora
+setTimeout(chequearBackupDiario, 20 * 1000); // y un primer chequeo a los 20seg de arrancar
+
+// Backup manual, para pedirlo en cualquier momento desde /admin sin esperar a las 5am.
+app.post("/admin/backup-ahora", requireAdminApi, async (_req, res) => {
+  try {
+    if (ES_STAGING === "true") {
+      return res.status(400).json({ error: "En staging no se mandan backups (son datos de prueba)." });
+    }
+    const config = loadConfig();
+    const dueño = equipoConPermiso(config, "esDueño")[0];
+    if (!dueño || !dueño.telefono) {
+      return res.status(400).json({ error: "No hay nadie marcado como \"Es el dueño\" con teléfono cargado en el Equipo." });
+    }
+    await hacerBackupYEnviarloPorWhatsapp();
+    res.json({ ok: true, enviadoA: dueño.telefono });
+  } catch (err) {
+    console.error("Error en backup manual:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== Aviso diario de cumpleaños próximos ====================
 let ultimoAvisoCumpleañosFecha = null; // para no mandar el aviso dos veces el mismo día
 
@@ -7255,7 +7406,7 @@ async function matchearIngredientesFactura(itemsFactura, ingredientesFudo, produ
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001", // emparejar nombres contra un catálogo — no hace falta Sonnet acá
         max_tokens: 1500,
         system: FUDO_MATCH_INGREDIENTES_SYSTEM_PROMPT,
         messages: [
@@ -7422,7 +7573,7 @@ async function matchearItemsConFudo(itemsTexto, productosFudo) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001", // emparejar el pedido con el catálogo — no hace falta Sonnet acá
         max_tokens: 1500,
         system: FUDO_MATCH_SYSTEM_PROMPT,
         messages: [{ role: "user", content: `Ítems pedidos:\n${itemsTexto}\n\nCatálogo de FUDO:\n${catalogoTexto}` }],
