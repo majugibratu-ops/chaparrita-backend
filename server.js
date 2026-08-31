@@ -3948,6 +3948,49 @@ app.post("/admin/empleados-agregar", requireAdminApi, requireSueldosApi, (req, r
   }
 });
 
+// Carga varios empleados de una sola vez. Formato, una línea por empleado:
+// nombre|tipo|cuit|dni|direccion|telefono  (cuit/dni/direccion/telefono son opcionales,
+// dejar vacío entre las barras si no se sabe todavía — ej: "Ruben Alejandro Núñez|normal|20-32587454-7|||")
+app.post("/admin/empleados-importar-masivo", requireAdminApi, requireSueldosApi, (req, res) => {
+  try {
+    const { texto } = req.body;
+    if (!texto || !texto.trim()) {
+      return res.status(400).json({ error: "Falta el texto a importar" });
+    }
+    const lineas = texto.split("\n").map((l) => l.trim()).filter(Boolean);
+    const lista = loadEmpleados();
+    let agregados = 0;
+    const errores = [];
+    lineas.forEach((linea, idx) => {
+      const partes = linea.split("|").map((p) => p.trim());
+      const [nombre, tipo, cuit, dni, direccion, telefono] = partes;
+      if (!nombre || !["normal", "mariano"].includes(tipo)) {
+        errores.push(`Línea ${idx + 1}: "${linea}" — falta el nombre o el tipo no es válido`);
+        return;
+      }
+      if (lista.some((e) => e.nombre.toLowerCase() === nombre.toLowerCase())) {
+        errores.push(`Línea ${idx + 1}: "${nombre}" — ya existe, se omitió`);
+        return;
+      }
+      lista.push({
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + idx,
+        nombre,
+        tipo,
+        cuit: cuit || "",
+        dni: dni || "",
+        direccion: direccion || "",
+        telefono: telefono ? normalizarTelefonoArgentino(telefono) : "",
+      });
+      agregados++;
+    });
+    saveEmpleados(lista);
+    res.json({ ok: true, agregados, errores });
+  } catch (err) {
+    console.error("Error importando empleados en masa:", err);
+    res.status(500).json({ error: "No se pudo importar" });
+  }
+});
+
 app.post("/admin/empleados-editar", requireAdminApi, requireSueldosApi, (req, res) => {
   try {
     const { id, nombre, tipo, cuit, dni, direccion, telefono } = req.body;
@@ -4019,6 +4062,19 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '<button id="btnAddEmpleado">Guardar empleado</button>',
     '<button id="btnCancelarEdicion" class="secundario" style="display:none">Cancelar edición</button>',
     '<div id="msgEmpleado" style="font-size:13px"></div>',
+    '</div>',
+
+    '<h2>Importar varios empleados de una vez</h2>',
+    '<p class="sub" style="margin-top:-6px">Una línea por empleado: <code>nombre|tipo|cuit|dni|dirección|teléfono</code> (los últimos cuatro son opcionales, dejalos vacíos si todavía no los sabés). Ya te dejamos cargados los que juntamos — revisalos y apretá "Importar todo" (si falta algún dato, lo completás después con "Editar").</p>',
+    '<div class="form-sueldo" style="max-width:640px">',
+    `<textarea id="miTextoEmpleados" rows="8">Medina Milagros Natalia|normal|27-44876369-8|44876369||
+Gonzalez Lourdes Sofia|normal|27-44344239-7|44344239|Pringles 2015|
+Coceres Mariano Nicolás|mariano|20-42186281-9|42186281||
+Romero Fiorela Katherina|normal|27-44647321-8|44647321|B° Simón Bolívar Mz 09 Cs 32|
+Ruben Alejandro Núñez|normal|20-32587454-7|||
+Valentina Marieth Gonzalez|normal||||</textarea>`,
+    '<button id="btnImportarEmpleados">Importar todo</button>',
+    '<div id="msgImportarEmpleados" style="font-size:13px;white-space:pre-wrap"></div>',
     '</div>',
 
     '<h2>Cargar sueldo del mes</h2>',
@@ -4128,6 +4184,21 @@ app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
     '  document.getElementById("btnCancelarEdicion").style.display = "none";',
     '}',
     'document.getElementById("btnCancelarEdicion").addEventListener("click", limpiarFormularioEmpleado);',
+    'document.getElementById("btnImportarEmpleados").addEventListener("click", function(){',
+    '  var texto = document.getElementById("miTextoEmpleados").value;',
+    '  var msg = document.getElementById("msgImportarEmpleados");',
+    '  if (!texto.trim()) { msg.textContent = "No hay nada para importar."; return; }',
+    '  fetch("/admin/empleados-importar-masivo", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({texto: texto})})',
+    '    .then(function(r){ return r.json(); })',
+    '    .then(function(data){',
+    '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
+    '      var m = "✅ Se importaron " + data.agregados + " empleado(s).";',
+    '      if (data.errores && data.errores.length > 0) { m += "\\n⚠️ " + data.errores.join("\\n"); }',
+    '      msg.textContent = m;',
+    '      cargarEmpleados();',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
     'function pintarSelectEmpleado(){',
     '  ["fEmpleado", "miEmpleadoSueldo", "rEmpleado"].forEach(function(idSelect){',
     '    var select = document.getElementById(idSelect);',
