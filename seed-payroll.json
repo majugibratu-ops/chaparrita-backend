@@ -1,0 +1,46 @@
+{
+  "_comentario": "Datos de arranque para el módulo de sueldos/adelantos. Este archivo se lee UNA vez al iniciar el servidor (server.js llama a sembrarDatosPayrollInicial): cada empleado, sueldo o adelanto de acá se agrega SOLO si todavía no existe en el sistema (por nombre, por mes, o por fecha+monto+medio) — así es seguro que el servidor lo lea en cada reinicio sin duplicar nada. Podés auditar/editar directamente este archivo antes de subirlo: es JSON plano, sin lógica de código en el medio.",
+
+  "empleados": [
+    { "nombre": "Medina Milagros Natalia", "tipo": "normal", "cuit": "27-44876369-8", "dni": "44876369", "direccion": "", "telefono": "" },
+    { "nombre": "Gonzalez Lourdes Sofia", "tipo": "normal", "cuit": "27-44344239-7", "dni": "44344239", "direccion": "Pringles 2015", "telefono": "" },
+    { "nombre": "Coceres Mariano Nicolás", "tipo": "mariano", "cuit": "20-42186281-9", "dni": "42186281", "direccion": "", "telefono": "" },
+    { "nombre": "Romero Fiorela Katherina", "tipo": "normal", "cuit": "27-44647321-8", "dni": "44647321", "direccion": "B° Simón Bolívar Mz 09 Cs 32", "telefono": "" },
+    { "nombre": "Ruben Alejandro Núñez", "tipo": "normal", "cuit": "20-32587454-7", "dni": "", "direccion": "", "telefono": "" },
+    { "nombre": "Valentina Marieth Gonzalez", "tipo": "normal", "cuit": "", "dni": "", "direccion": "", "telefono": "" }
+  ],
+
+  "sueldos": [
+    { "empleado": "Ruben Alejandro Núñez", "mes": "2026-06", "tipo": "normal", "montoRecibo": 508290.47 },
+    { "empleado": "Ruben Alejandro Núñez", "mes": "2026-07", "tipo": "normal", "montoRecibo": 799018.52, "_nota": "Julio $543.995,47 + SAC 1er sem $255.023,05" }
+  ],
+
+  "adelantos": [
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-06-05", "monto": 61961.11, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-06-07", "monto": 21000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-06-18", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-06-26", "monto": 100000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-05", "monto": 150000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-10", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-12", "monto": 20000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-15", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-16", "monto": 20000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-18", "monto": 50000, "medioPago": "efectivo" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-19", "monto": 100000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-20", "monto": 100000, "medioPago": "efectivo" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-26", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-26", "monto": 50000, "medioPago": "efectivo" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-27", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-07-30", "monto": 12500, "medioPago": "mercadopago", "_nota": "Del comprobante de $50.000: solo $12.500 era adelanto, el resto ($37.500) era pago de 12,5hs" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-02", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-03", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-06", "monto": 30000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-08", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-11", "monto": 32000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-15", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-17", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-21", "monto": 36000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-23", "monto": 50000, "medioPago": "mercadopago" },
+    { "empleado": "Ruben Alejandro Núñez", "fecha": "2026-08-23", "monto": 30000, "medioPago": "mercadopago" }
+  ]
+}
