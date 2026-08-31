@@ -206,46 +206,56 @@ function saveEmpleados(lista) {
   fs.writeFileSync(EMPLEADOS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
-// Carga automática, UNA sola vez al arrancar el servidor, de los datos de Ruben Alejandro
-// Núñez y sus compañeros que juntamos analizando el chat y el extracto bancario — así Tuti
-// no tiene que tipear ni pegar nada a mano. Es segura de correr en cada reinicio: se fija
-// primero si cada dato ya existe (por nombre, por mes, o por fecha+monto) antes de agregarlo,
-// así nunca duplica nada aunque el servidor se reinicie muchas veces.
+
+// Carga automática, UNA sola vez al arrancar el servidor, de los datos que estén en
+// seed-payroll.json (empleados/sueldos/adelantos ya auditados fuera de este código) — así
+// Tuti no tiene que tipear ni pegar nada a mano, y para auditar alcanza con abrir ese archivo
+// JSON directamente, sin buscar nada en medio del código. Es segura de correr en cada
+// reinicio: cada dato se agrega SOLO si todavía no existe (por nombre, por mes, o por
+// fecha+monto+medio), así nunca duplica nada.
+const SEED_PAYROLL_PATH = path.join(__dirname, "seed-payroll.json");
 function sembrarDatosPayrollInicial() {
   try {
-    const empleadosSemilla = [
-      { nombre: "Medina Milagros Natalia", tipo: "normal", cuit: "27-44876369-8", dni: "44876369", direccion: "", telefono: "" },
-      { nombre: "Gonzalez Lourdes Sofia", tipo: "normal", cuit: "27-44344239-7", dni: "44344239", direccion: "Pringles 2015", telefono: "" },
-      { nombre: "Coceres Mariano Nicolás", tipo: "mariano", cuit: "20-42186281-9", dni: "42186281", direccion: "", telefono: "" },
-      { nombre: "Romero Fiorela Katherina", tipo: "normal", cuit: "27-44647321-8", dni: "44647321", direccion: "B° Simón Bolívar Mz 09 Cs 32", telefono: "" },
-      { nombre: "Ruben Alejandro Núñez", tipo: "normal", cuit: "20-32587454-7", dni: "", direccion: "", telefono: "" },
-      { nombre: "Valentina Marieth Gonzalez", tipo: "normal", cuit: "", dni: "", direccion: "", telefono: "" },
-    ];
+    if (!fs.existsSync(SEED_PAYROLL_PATH)) return; // no pasa nada si no existe el archivo
+    const semilla = JSON.parse(fs.readFileSync(SEED_PAYROLL_PATH, "utf8"));
+
     const empleados = loadEmpleados();
     let cambioEmpleados = false;
-    empleadosSemilla.forEach((e) => {
+    (semilla.empleados || []).forEach((e) => {
       if (!empleados.some((ex) => ex.nombre.toLowerCase() === e.nombre.toLowerCase())) {
-        empleados.push({ id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8), ...e });
+        empleados.push({
+          id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          nombre: e.nombre,
+          tipo: e.tipo,
+          cuit: e.cuit || "",
+          dni: e.dni || "",
+          direccion: e.direccion || "",
+          telefono: e.telefono || "",
+        });
         cambioEmpleados = true;
       }
     });
     if (cambioEmpleados) saveEmpleados(empleados);
 
-    const sueldosSemilla = [
-      { empleado: "Ruben Alejandro Núñez", mes: "2026-06", tipo: "normal", montoRecibo: 508290.47 },
-      { empleado: "Ruben Alejandro Núñez", mes: "2026-07", tipo: "normal", montoRecibo: 799018.52 }, // incluye SAC 1er sem sumado
-    ];
     const sueldos = loadSueldos();
     let cambioSueldos = false;
-    sueldosSemilla.forEach((s) => {
+    (semilla.sueldos || []).forEach((s) => {
       if (!sueldos.some((ex) => ex.empleado === s.empleado && ex.mes === s.mes)) {
+        let total, registro;
+        if (s.tipo === "mariano") {
+          total = 2 * s.montoDeclarado + s.montoBase;
+          registro = { montoDeclarado: s.montoDeclarado, montoBase: s.montoBase };
+        } else {
+          total = s.montoRecibo;
+          registro = { montoRecibo: s.montoRecibo };
+        }
         sueldos.push({
           id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
           empleado: s.empleado,
           mes: s.mes,
           tipo: s.tipo,
-          montoRecibo: s.montoRecibo,
-          total: s.montoRecibo,
+          ...registro,
+          total,
           creadoEn: new Date().toISOString(),
         });
         cambioSueldos = true;
@@ -253,43 +263,12 @@ function sembrarDatosPayrollInicial() {
     });
     if (cambioSueldos) saveSueldos(sueldos);
 
-    // Adelantos de Ruben (junio, julio, agosto) — ya revisados a fondo contra el chat: se
-    // sacaron los que en realidad eran pago de horas o reintegro de compras, y se sumaron
-    // los que eran en efectivo y no aparecían en el extracto de Mercadopago.
-    const adelantosSemilla = [
-      { fecha: "2026-06-05", monto: 61961.11, medioPago: "mercadopago" },
-      { fecha: "2026-06-07", monto: 21000, medioPago: "mercadopago" },
-      { fecha: "2026-06-18", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-06-26", monto: 100000, medioPago: "mercadopago" },
-      { fecha: "2026-07-05", monto: 150000, medioPago: "mercadopago" },
-      { fecha: "2026-07-10", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-07-12", monto: 20000, medioPago: "mercadopago" },
-      { fecha: "2026-07-15", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-07-16", monto: 20000, medioPago: "mercadopago" },
-      { fecha: "2026-07-18", monto: 50000, medioPago: "efectivo" },
-      { fecha: "2026-07-19", monto: 100000, medioPago: "mercadopago" },
-      { fecha: "2026-07-20", monto: 100000, medioPago: "efectivo" },
-      { fecha: "2026-07-26", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-07-26", monto: 50000, medioPago: "efectivo" },
-      { fecha: "2026-07-27", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-07-30", monto: 12500, medioPago: "mercadopago" },
-      { fecha: "2026-08-02", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-08-03", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-08-06", monto: 30000, medioPago: "mercadopago" },
-      { fecha: "2026-08-08", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-08-11", monto: 32000, medioPago: "mercadopago" },
-      { fecha: "2026-08-15", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-08-17", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-08-21", monto: 36000, medioPago: "mercadopago" },
-      { fecha: "2026-08-23", monto: 50000, medioPago: "mercadopago" },
-      { fecha: "2026-08-23", monto: 30000, medioPago: "mercadopago" },
-    ];
     const adelantos = loadAdelantos();
     let cambioAdelantos = false;
-    adelantosSemilla.forEach((a) => {
+    (semilla.adelantos || []).forEach((a) => {
       const yaExiste = adelantos.some(
         (ex) =>
-          ex.empleado === "Ruben Alejandro Núñez" &&
+          ex.empleado === a.empleado &&
           ex.fecha === a.fecha &&
           Math.abs(ex.monto - a.monto) < 0.01 &&
           ex.medioPago === a.medioPago
@@ -297,11 +276,11 @@ function sembrarDatosPayrollInicial() {
       if (!yaExiste) {
         adelantos.push({
           id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
-          empleado: "Ruben Alejandro Núñez",
+          empleado: a.empleado,
           fecha: a.fecha,
           monto: a.monto,
           medioPago: a.medioPago,
-          nota: "Cargado automáticamente desde el análisis del chat — revisar",
+          nota: a._nota || "Cargado desde seed-payroll.json — revisar",
           saldado: false,
           creadoEn: new Date().toISOString(),
         });
@@ -311,13 +290,14 @@ function sembrarDatosPayrollInicial() {
     if (cambioAdelantos) saveAdelantos(adelantos);
 
     if (cambioEmpleados || cambioSueldos || cambioAdelantos) {
-      console.log("Datos iniciales de sueldos/adelantos de Ruben cargados automáticamente.");
+      console.log("Datos iniciales de sueldos/adelantos cargados desde seed-payroll.json.");
     }
   } catch (err) {
     console.error("Error sembrando datos iniciales de payroll:", err);
   }
 }
 sembrarDatosPayrollInicial();
+
 
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
 function loadMenuText() {
@@ -612,6 +592,44 @@ function extractMarcarCompradoMarker(text) {
   } catch {
     console.error("No se pudo parsear MARCAR_COMPRADO:", match[1]);
     return { cleanText, marcarComprado: null };
+  }
+}
+
+// Saca la marca interna [[BOTONES: {"texto":"...", "opciones":["...", "..."]}]] — hasta 3
+// opciones. La usa Claude en la charla libre cuando quiere ofrecer una elección corta y
+// cerrada (sí/no, confirmar, elegir entre 2-3 cosas), en vez de que el cliente tenga que
+// escribirla a mano.
+function extractBotonesMarker(text) {
+  const regex = /\[\[BOTONES:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, botones: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    const datos = JSON.parse(match[1]);
+    if (!datos.texto || !Array.isArray(datos.opciones) || datos.opciones.length === 0) return { cleanText, botones: null };
+    return { cleanText, botones: datos };
+  } catch {
+    console.error("No se pudo parsear BOTONES:", match[1]);
+    return { cleanText, botones: null };
+  }
+}
+
+// Saca la marca interna
+// [[LISTA: {"texto":"...", "textoBoton":"...", "opciones":[{"titulo":"...","desc":"..."}]}]]
+// — hasta 10 opciones. La usa Claude cuando hay más de 3 alternativas para elegir (ej: varias
+// promos, varios sectores con detalle, etc.) y los botones no alcanzan.
+function extractListaMarker(text) {
+  const regex = /\[\[LISTA:\s*(\{[\s\S]*?\})\]\]/;
+  const match = text.match(regex);
+  if (!match) return { cleanText: text, lista: null };
+  const cleanText = text.replace(regex, "").trim();
+  try {
+    const datos = JSON.parse(match[1]);
+    if (!datos.texto || !Array.isArray(datos.opciones) || datos.opciones.length === 0) return { cleanText, lista: null };
+    return { cleanText, lista: datos };
+  } catch {
+    console.error("No se pudo parsear LISTA:", match[1]);
+    return { cleanText, lista: null };
   }
 }
 
@@ -2294,13 +2312,34 @@ app.post("/webhook", async (req, res) => {
     const { cleanText: sinEspera, datosEspera } = extractListaEsperaMarker(sinPostulante);
     const { cleanText: sinActualizacion, actualizacion } = extractActualizarReservaMarker(sinEspera);
     const { cleanText: sinCancelacion, cancelacion } = extractCancelarReservaMarker(sinActualizacion);
-    const { cleanText: cleanText2, marcarComprado } = extractMarcarCompradoMarker(sinCancelacion);
+    const { cleanText: sinMarcado, marcarComprado } = extractMarcarCompradoMarker(sinCancelacion);
+    const { cleanText: sinBotones, botones } = extractBotonesMarker(sinMarcado);
+    const { cleanText: cleanText2, lista } = extractListaMarker(sinBotones);
 
     history.push({ role: "assistant", content: [{ type: "text", text: cleanText2 }] });
     conversations.set(from, history);
 
     await sendWhatsappText(from, cleanText2);
     agregarMensajeInbox(from, "chaparrita", cleanText2);
+
+    // Si Claude pidió botones o una lista en su respuesta, se los mandamos justo después del
+    // mensaje de texto normal — el cliente los ve como una segunda "burbuja" con las opciones
+    // tocables. Si toca una, el webhook ya la convierte en texto normal antes de procesarla,
+    // así que el resto de la conversación sigue exactamente igual que si la hubiese escrito.
+    if (botones) {
+      await sendWhatsappButtons(
+        from,
+        botones.texto,
+        botones.opciones.slice(0, 3).map((op, idx) => ({ id: `libre_${idx}`, titulo: op }))
+      );
+    } else if (lista) {
+      await sendWhatsappList(from, lista.texto, lista.textoBoton || "Elegir", [
+        {
+          titulo: "Opciones",
+          filas: lista.opciones.slice(0, 10).map((op, idx) => ({ id: `libre_${idx}`, titulo: op.titulo, desc: op.desc || "" })),
+        },
+      ]);
+    }
 
     if (reservaConfirmada && config.grupoReservasWhatsappId) {
       await sendWhatsappText(config.grupoReservasWhatsappId, reservaConfirmada);
@@ -2899,6 +2938,9 @@ function normalizarParaEnvioAR(numero) {
 // ==================== Envío de mensajes por WhatsApp ====================
 async function sendWhatsappText(to, body) {
   const destino = normalizarParaEnvioAR(to);
+  // Solo en staging (ES_STAGING=true): le agregamos un aviso arriba de TODOS los mensajes,
+  // para nunca confundir si te está contestando el bot de prueba o el real.
+  const bodyFinal = ES_STAGING === "true" ? `🧪 [PRUEBA — STAGING]\n${body}` : body;
   console.log(`Enviando mensaje a ${destino} (original: ${to}) vía WhatsApp (Phone Number ID: ${WHATSAPP_PHONE_NUMBER_ID})...`);
   try {
     const response = await fetch(`https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
@@ -2911,7 +2953,7 @@ async function sendWhatsappText(to, body) {
         messaging_product: "whatsapp",
         to: destino,
         type: "text",
-        text: { body },
+        text: { body: bodyFinal },
       }),
     });
     const data = await response.json();
@@ -2934,6 +2976,7 @@ async function sendWhatsappText(to, body) {
 // así que el resto del bot no necesita saber que vino de un botón.
 async function sendWhatsappButtons(to, bodyText, botones) {
   const destino = normalizarParaEnvioAR(to);
+  const bodyTextFinal = ES_STAGING === "true" ? `🧪 [PRUEBA] ${bodyText}` : bodyText;
   const botonesRecortados = botones.slice(0, 3).map((b) => ({
     type: "reply",
     reply: { id: b.id, title: (b.titulo || "").slice(0, 20) },
@@ -2952,7 +2995,7 @@ async function sendWhatsappButtons(to, bodyText, botones) {
         type: "interactive",
         interactive: {
           type: "button",
-          body: { text: bodyText },
+          body: { text: bodyTextFinal },
           action: { buttons: botonesRecortados },
         },
       }),
@@ -2973,6 +3016,7 @@ async function sendWhatsappButtons(to, bodyText, botones) {
 // más de 3 alternativas). "secciones" es un array de {titulo, filas: [{id, titulo, desc}]}.
 async function sendWhatsappList(to, bodyText, textoBoton, secciones) {
   const destino = normalizarParaEnvioAR(to);
+  const bodyTextFinal = ES_STAGING === "true" ? `🧪 [PRUEBA] ${bodyText}` : bodyText;
   const seccionesFormateadas = secciones.map((s) => ({
     title: (s.titulo || "").slice(0, 24),
     rows: s.filas.slice(0, 10).map((f) => ({
@@ -2995,7 +3039,7 @@ async function sendWhatsappList(to, bodyText, textoBoton, secciones) {
         type: "interactive",
         interactive: {
           type: "list",
-          body: { text: bodyText },
+          body: { text: bodyTextFinal },
           action: { button: (textoBoton || "Elegir").slice(0, 20), sections: seccionesFormateadas },
         },
       }),
@@ -4214,21 +4258,16 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '<div id="msgImportarSueldos" style="font-size:13px;white-space:pre-wrap"></div>',
     '</div>',
 
-    '<h2>Resumen para mandarle al empleado</h2>',
-    '<p class="sub" style="margin-top:-6px">Arma un texto prolijo con el detalle de sueldo y cada adelanto, listo para copiar y pegar en WhatsApp.</p>',
-    '<div class="form-sueldo" style="max-width:520px">',
+    '<h2>Estado de cuenta del empleado</h2>',
+    '<p class="sub" style="margin-top:-6px">Sueldo y adelantos en orden de fecha, con el saldo corrido — no importa "de qué mes" es cada adelanto, simplemente descuenta el saldo disponible en ese momento.</p>',
+    '<div class="form-sueldo" style="max-width:420px">',
     '<div><label>Empleado</label><select id="rEmpleado"><option value="">Elegí un empleado...</option></select></div>',
-    '<div><label>Desde (mes)</label><input id="rMesDesde" type="month"></div>',
-    '<div><label>Hasta (mes)</label><input id="rMesHasta" type="month"></div>',
-    '<button id="btnGenerarResumen">Generar resumen</button>',
-    '<textarea id="rResultado" rows="14" style="display:none;font-family:monospace;font-size:12.5px" readonly></textarea>',
-    '<button id="btnCopiarResumen" style="display:none" class="secundario">Copiar texto</button>',
-    '<div id="msgResumen" style="font-size:13px"></div>',
+    '<button id="btnGenerarResumen">Ver estado de cuenta</button>',
     '</div>',
-
-    '<h2>Resumen por empleado (sueldo − adelantos pendientes)</h2>',
-    '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
-    '<div id="resumen">Cargando...</div>',
+    '<div id="cuentaCorrienteBox" style="display:none;margin-top:14px"></div>',
+    '<textarea id="rResultado" rows="14" style="display:none;font-family:monospace;font-size:12.5px;margin-top:10px" readonly></textarea>',
+    '<button id="btnCopiarResumen" style="display:none" class="secundario">Copiar texto (para mandar por WhatsApp)</button>',
+    '<div id="msgResumen" style="font-size:13px"></div>',
 
     '<script>',
     'var SUELDOS = []; var ADELANTOS = []; var EMPLEADOS = [];',
@@ -4376,45 +4415,51 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '}',
     '["fMontoRecibo","fMontoDeclarado","fMontoBase"].forEach(function(id){ document.getElementById(id).addEventListener("input", actualizarPreview); });',
     '',
-    'function pintarFiltroMes(){',
-    '  var select = document.getElementById("filtroMes");',
-    '  var mesesUnicos = Array.from(new Set(SUELDOS.map(function(s){ return s.mes; }).concat(ADELANTOS.map(function(a){ return a.fecha.slice(0,7); })))).sort().reverse();',
-    '  var mesActual = hoyMes();',
-    '  if (mesesUnicos.indexOf(mesActual) === -1) mesesUnicos.unshift(mesActual);',
-    '  select.innerHTML = "";',
-    '  mesesUnicos.forEach(function(m){ var opt = document.createElement("option"); opt.value = m; opt.textContent = nombreMes(m); select.appendChild(opt); });',
-    '  select.value = mesActual;',
-    '}',
-    '',
-    '',
-    'function pintarResumen(){',
-    '  var mesElegido = document.getElementById("filtroMes").value;',
-    '  var sueldosDelMes = SUELDOS.filter(function(s){ return s.mes === mesElegido; });',
-    '  var nombres = Array.from(new Set(sueldosDelMes.map(function(s){ return s.empleado; }))).sort();',
-    '  var cont = document.getElementById("resumen");',
-    '  cont.innerHTML = "";',
-    '  if (nombres.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🧾</div>No hay sueldos cargados este mes.</div>"; return; }',
-    '  nombres.forEach(function(nombre){',
-    '    var sueldo = sueldosDelMes.filter(function(s){ return s.empleado === nombre; }).slice(-1)[0];',
-    '    var adelantosPendientes = ADELANTOS.filter(function(a){ return a.empleado === nombre && a.fecha.slice(0,7) === mesElegido && !a.saldado; });',
-    '    var totalAdelantos = adelantosPendientes.reduce(function(s,a){ return s + Number(a.monto); }, 0);',
-    '    var neto = sueldo.total - totalAdelantos;',
-    '    var div = document.createElement("div");',
-    '    div.className = "card empleado-card";',
-    '    var detalle = sueldo.tipo === "mariano"',
-    '      ? "(2 × $" + Number(sueldo.montoDeclarado).toLocaleString("es-AR") + ") + $" + Number(sueldo.montoBase).toLocaleString("es-AR")',
-    '      : "Recibo: $" + Number(sueldo.montoRecibo).toLocaleString("es-AR");',
-    '    div.innerHTML = "<h3>" + nombre + "</h3>" +',
-    '      "<div class=\\"linea\\">Sueldo del mes: $" + sueldo.total.toLocaleString("es-AR") + " <span style=\\"color:var(--texto-tenue)\\">(" + detalle + ")</span></div>" +',
-    '      "<div class=\\"linea\\">Adelantos pendientes: -$" + totalAdelantos.toLocaleString("es-AR") + "</div>" +',
-    '      "<div class=\\"neto\\">Neto a pagar: $" + neto.toLocaleString("es-AR") + "</div>" +',
-    '      "<button class=\\"btn-danger\\" data-id=\\"" + sueldo.id + "\\">✕ Borrar este sueldo cargado</button>";',
-    '    cont.appendChild(div);',
+    'function pintarCuentaCorriente(){',
+    '  var empleado = document.getElementById("rEmpleado").value;',
+    '  var box = document.getElementById("cuentaCorrienteBox");',
+    '  if (!empleado) { box.style.display = "none"; return; }',
+    '  var sueldosEmp = SUELDOS.filter(function(s){ return s.empleado === empleado; });',
+    '  var adelantosEmp = ADELANTOS.filter(function(a){ return a.empleado === empleado; });',
+    '  var movimientos = [];',
+    '  sueldosEmp.forEach(function(s){ movimientos.push({ fecha: s.mes + "-01", concepto: "Sueldo " + nombreMes(s.mes), monto: s.total }); });',
+    '  adelantosEmp.forEach(function(a){',
+    '    var medio = a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago";',
+    '    var concepto = "Adelanto (" + medio + ")" + (a.nota ? " — " + a.nota : "");',
+    '    movimientos.push({ fecha: a.fecha, concepto: concepto, monto: -a.monto, id: a.id, esAdelanto: true });',
     '  });',
-    '  document.querySelectorAll(".btn-danger").forEach(function(btn){',
+    '  movimientos.sort(function(a,b){ return a.fecha.localeCompare(b.fecha); });',
+    '  var saldo = 0;',
+    '  movimientos.forEach(function(m){ saldo += m.monto; m.saldo = saldo; });',
+    '  box.innerHTML = "";',
+    '  if (movimientos.length === 0) { box.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">🧾</div>Todavía no hay sueldos ni adelantos cargados para " + empleado + ".</div>"; box.style.display = "block"; return; }',
+    '  var tabla = document.createElement("table");',
+    '  tabla.className = "tabla-adelantos";',
+    '  tabla.innerHTML = "<thead><tr><th>Fecha</th><th>Concepto</th><th>Monto</th><th>Saldo</th><th></th></tr></thead>";',
+    '  var tbody = document.createElement("tbody");',
+    '  movimientos.forEach(function(m){',
+    '    var tr = document.createElement("tr");',
+    '    var signo = m.monto >= 0 ? "+" : "-";',
+    '    var color = m.monto >= 0 ? "var(--verde-wa)" : "var(--coral)";',
+    '    var tdBtn = "";',
+    '    if (m.esAdelanto) tdBtn = "<button class=\\"btn-danger\\" data-id=\\"" + m.id + "\\" style=\\"font-size:11px\\">✕</button>";',
+    '    tr.innerHTML = "<td>" + m.fecha.split("-").reverse().join("/") + "</td><td>" + m.concepto + "</td>" +',
+    '      "<td style=\\"color:" + color + "\\">" + signo + "$" + Math.abs(m.monto).toLocaleString("es-AR") + "</td>" +',
+    '      "<td><b>$" + m.saldo.toLocaleString("es-AR") + "</b></td><td>" + tdBtn + "</td>";',
+    '    tbody.appendChild(tr);',
+    '  });',
+    '  tabla.appendChild(tbody);',
+    '  box.appendChild(tabla);',
+    '  var saldoFinal = movimientos[movimientos.length - 1].saldo;',
+    '  var resumenFinal = document.createElement("div");',
+    '  resumenFinal.className = "neto"; resumenFinal.style.marginTop = "10px";',
+    '  resumenFinal.textContent = (saldoFinal >= 0 ? "Saldo a favor del empleado: $" : "Saldo a favor de Chaparrita: $") + Math.abs(saldoFinal).toLocaleString("es-AR");',
+    '  box.appendChild(resumenFinal);',
+    '  box.style.display = "block";',
+    '  box.querySelectorAll(".btn-danger").forEach(function(btn){',
     '    btn.addEventListener("click", function(){',
-    '      if (!confirm("¿Borrar este sueldo cargado?")) return;',
-    '      fetch("/admin/sueldos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
+    '      if (!confirm("¿Borrar este adelanto?")) return;',
+    '      fetch("/admin/adelantos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
     '        .then(function(r){ return r.json(); })',
     '        .then(function(){ cargarTodo(); });',
     '    });',
@@ -4428,10 +4473,10 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '    cargarEmpleados()',
     '  ]).then(function(res){',
     '    SUELDOS = res[0]; ADELANTOS = res[1];',
-    '    pintarFiltroMes(); pintarResumen();',
-    '  }).catch(function(e){ document.getElementById("resumen").textContent = "Error: " + e.message; });',
+    '    pintarCuentaCorriente();',
+    '  }).catch(function(e){ document.getElementById("cuentaCorrienteBox").textContent = "Error: " + e.message; });',
     '}',
-    'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
+    'document.getElementById("rEmpleado").addEventListener("change", pintarCuentaCorriente);',
     'document.getElementById("btnAgregar").addEventListener("click", function(){',
     '  var empleado = document.getElementById("fEmpleado").value.trim();',
     '  var mes = document.getElementById("fMes").value;',
@@ -4478,11 +4523,10 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '',
     'document.getElementById("btnGenerarResumen").addEventListener("click", function(){',
     '  var empleado = document.getElementById("rEmpleado").value;',
-    '  var mesDesde = document.getElementById("rMesDesde").value;',
-    '  var mesHasta = document.getElementById("rMesHasta").value;',
     '  var msg = document.getElementById("msgResumen");',
-    '  if (!empleado || !mesDesde || !mesHasta) { msg.textContent = "Completá empleado y los dos meses."; return; }',
-    '  fetch("/admin/resumen-empleado", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado, mesDesde: mesDesde, mesHasta: mesHasta})})',
+    '  if (!empleado) { msg.textContent = "Elegí un empleado."; return; }',
+    '  pintarCuentaCorriente();',
+    '  fetch("/admin/resumen-empleado", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado})})',
     '    .then(function(r){ return r.json(); })',
     '    .then(function(data){',
     '      if (data.error) { msg.textContent = "Error: " + data.error; return; }',
@@ -4621,62 +4665,69 @@ app.post("/admin/sueldos-borrar", requireAdminApi, requireSueldosApi, (req, res)
   }
 });
 
-// Arma un resumen prolijo y transparente de sueldo + adelantos de un empleado, listo para
-// mandarle por WhatsApp — pensado para que el empleado vea el detalle completo (cada
-// adelanto con fecha y medio de pago) y no le queden dudas de cómo se llegó al total.
+// Arma el "estado de cuenta" completo de un empleado, en orden cronológico: cada sueldo
+// SUMA saldo a favor del empleado, cada adelanto RESTA — con el saldo corrido después de
+// cada movimiento. Es la misma lógica que una cartola de banco: no importa "de qué mes" es
+// cada adelanto, simplemente va descontando el saldo disponible en el momento en que se dio,
+// venga de donde venga (sueldo del mes anterior, aguinaldo, etc.).
+function construirCuentaCorrienteEmpleado(empleado, sueldos, adelantos) {
+  const nombreMes = (mesISO) => {
+    const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+    const [y, m] = mesISO.split("-");
+    return `${meses[parseInt(m, 10) - 1]} ${y}`;
+  };
+  const movimientos = [];
+  sueldos
+    .filter((s) => s.empleado === empleado)
+    .forEach((s) => {
+      movimientos.push({ fecha: `${s.mes}-01`, concepto: `Sueldo ${nombreMes(s.mes)}`, monto: s.total });
+    });
+  adelantos
+    .filter((a) => a.empleado === empleado)
+    .forEach((a) => {
+      const medio = a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago";
+      let concepto = `Adelanto (${medio})`;
+      if (a.nota) concepto += ` — ${a.nota}`;
+      movimientos.push({ fecha: a.fecha, concepto, monto: -a.monto });
+    });
+  movimientos.sort((a, b) => a.fecha.localeCompare(b.fecha));
+  let saldo = 0;
+  return movimientos.map((m) => {
+    saldo += m.monto;
+    return { ...m, saldo };
+  });
+}
+
 app.post("/admin/resumen-empleado", requireAdminApi, requireSueldosApi, (req, res) => {
   try {
-    const { empleado, mesDesde, mesHasta } = req.body;
-    if (!empleado || !mesDesde || !mesHasta) {
-      return res.status(400).json({ error: "Falta el empleado o el rango de meses" });
+    const { empleado } = req.body;
+    if (!empleado) {
+      return res.status(400).json({ error: "Falta el empleado" });
     }
-    const sueldos = loadSueldos()
-      .filter((s) => s.empleado === empleado && s.mes >= mesDesde && s.mes <= mesHasta)
-      .sort((a, b) => a.mes.localeCompare(b.mes));
-    const adelantos = loadAdelantos()
-      .filter((a) => a.empleado === empleado && a.fecha.slice(0, 7) >= mesDesde && a.fecha.slice(0, 7) <= mesHasta)
-      .sort((a, b) => a.fecha.localeCompare(b.fecha));
-
-    const nombreMes = (mesISO) => {
-      const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
-      const [y, m] = mesISO.split("-");
-      return `${meses[parseInt(m, 10) - 1]} ${y}`;
-    };
+    const cuenta = construirCuentaCorrienteEmpleado(empleado, loadSueldos(), loadAdelantos());
     const fmt = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-    let texto = `📋 *RESUMEN DE SUELDO Y ADELANTOS*\n${empleado}\n`;
-    texto += `Período: ${nombreMes(mesDesde)}${mesDesde !== mesHasta ? ` a ${nombreMes(mesHasta)}` : ""}\n\n`;
+    let texto = `📋 *ESTADO DE CUENTA — SUELDO Y ADELANTOS*\n${empleado}\n\n`;
+    if (cuenta.length === 0) {
+      texto += `(todavía no hay sueldos ni adelantos cargados)`;
+    } else {
+      cuenta.forEach((m) => {
+        const [y, mm, d] = m.fecha.split("-");
+        const signo = m.monto >= 0 ? "+" : "-";
+        texto += `${d}/${mm}/${y} — ${m.concepto}: ${signo}$${fmt(Math.abs(m.monto))} → saldo: $${fmt(m.saldo)}\n`;
+      });
+      const saldoFinal = cuenta[cuenta.length - 1].saldo;
+      texto += `\n✅ *SALDO ACTUAL*\n`;
+      texto += saldoFinal >= 0 ? `A favor del empleado: $${fmt(saldoFinal)}` : `A favor de Chaparrita: $${fmt(Math.abs(saldoFinal))}`;
+    }
 
-    texto += `💰 *SUELDO*\n`;
-    let totalSueldo = 0;
-    sueldos.forEach((s) => {
-      texto += `${nombreMes(s.mes)}: $${fmt(s.total)}\n`;
-      totalSueldo += s.total;
-    });
-    if (sueldos.length === 0) texto += `(sin sueldo cargado en este período)\n`;
-    texto += `*Total sueldo: $${fmt(totalSueldo)}*\n\n`;
-
-    texto += `💵 *ADELANTOS RECIBIDOS*\n`;
-    let totalAdelantos = 0;
-    adelantos.forEach((a) => {
-      const [y, m, d] = a.fecha.split("-");
-      const medio = a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago";
-      texto += `${d}/${m} - $${fmt(a.monto)} (${medio})\n`;
-      totalAdelantos += a.monto;
-    });
-    if (adelantos.length === 0) texto += `(sin adelantos cargados en este período)\n`;
-    texto += `*Total adelantos: $${fmt(totalAdelantos)}*\n\n`;
-
-    const saldo = totalSueldo - totalAdelantos;
-    texto += `✅ *SALDO*\n`;
-    texto += saldo >= 0 ? `A favor del empleado: $${fmt(saldo)}` : `A favor de Chaparrita: $${fmt(Math.abs(saldo))}`;
-
-    res.json({ ok: true, texto, totalSueldo, totalAdelantos, saldo });
+    res.json({ ok: true, texto, cuenta });
   } catch (err) {
-    console.error("Error armando resumen de empleado:", err);
+    console.error("Error armando estado de cuenta de empleado:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
   const html = [
@@ -4739,9 +4790,10 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '<button id="btnGuardarCandidatos">Guardar seleccionados</button>',
     '</div>',
 
-    '<h2>Resumen por empleado</h2>',
-    '<div class="filtro-mes">Mes: <select id="filtroMes"></select></div>',
-    '<div id="resumen">Cargando...</div>',
+    '<h2>Adelantos por empleado</h2>',
+    '<p class="sub" style="margin-top:-6px">Listado simple, ordenado por fecha. Para ver el saldo real (sueldo menos adelantos) entrá a <a href="/admin/sueldos">/admin/sueldos</a> — esa pantalla tiene una segunda contraseña porque cruza datos de sueldo.</p>',
+    '<div class="filtro-mes">Empleado: <select id="filtroEmpleadoResumen"><option value="">Elegí un empleado...</option></select></div>',
+    '<div id="resumen">Elegí un empleado para ver sus adelantos.</div>',
 
     '<script>',
     'var TODOS = []; var EMPLEADOS = [];',
@@ -4754,17 +4806,15 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '  return meses[parseInt(partes[1],10)-1] + " " + partes[0];',
     '}',
     '',
-    'function pintarFiltroMes(){',
-    '  var select = document.getElementById("filtroMes");',
-    '  var mesesUnicos = Array.from(new Set(TODOS.map(function(a){ return mesDe(a.fecha); }))).sort().reverse();',
-    '  var mesActual = mesDe(hoyISO());',
-    '  if (mesesUnicos.indexOf(mesActual) === -1) mesesUnicos.unshift(mesActual);',
-    '  select.innerHTML = "";',
-    '  mesesUnicos.forEach(function(m){',
-    '    var opt = document.createElement("option"); opt.value = m; opt.textContent = nombreMes(m);',
+    'function pintarFiltroEmpleadoResumen(){',
+    '  var select = document.getElementById("filtroEmpleadoResumen");',
+    '  var valorActual = select.value;',
+    '  select.innerHTML = "<option value=\\"\\">Elegí un empleado...</option>";',
+    '  EMPLEADOS.slice().sort(function(a,b){ return a.nombre.localeCompare(b.nombre); }).forEach(function(e){',
+    '    var opt = document.createElement("option"); opt.value = e.nombre; opt.textContent = e.nombre;',
     '    select.appendChild(opt);',
     '  });',
-    '  select.value = mesActual;',
+    '  select.value = valorActual;',
     '}',
     '',
     'function pintarSelectEmpleado(){',
@@ -4781,45 +4831,24 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '}',
     '',
     'function pintarResumen(){',
-    '  var mesElegido = document.getElementById("filtroMes").value;',
-    '  var delMes = TODOS.filter(function(a){ return mesDe(a.fecha) === mesElegido; });',
-    '  var porEmpleado = {};',
-    '  delMes.forEach(function(a){ (porEmpleado[a.empleado] = porEmpleado[a.empleado] || []).push(a); });',
+    '  var empleadoElegido = document.getElementById("filtroEmpleadoResumen").value;',
     '  var cont = document.getElementById("resumen");',
     '  cont.innerHTML = "";',
-    '  var nombres = Object.keys(porEmpleado).sort();',
-    '  if (nombres.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">💵</div>No hay adelantos cargados este mes.</div>"; return; }',
-    '  nombres.forEach(function(nombre){',
-    '    var lista = porEmpleado[nombre];',
-    '    var pendientes = lista.filter(function(a){ return !a.saldado; });',
-    '    var totalEfectivo = pendientes.filter(function(a){ return a.medioPago === "efectivo"; }).reduce(function(s,a){ return s + Number(a.monto); }, 0);',
-    '    var totalMP = pendientes.filter(function(a){ return a.medioPago === "mercadopago"; }).reduce(function(s,a){ return s + Number(a.monto); }, 0);',
-    '    var totalGeneral = totalEfectivo + totalMP;',
-    '    var div = document.createElement("div");',
-    '    div.className = "card empleado-card";',
-    '    var html = "<h3>" + nombre + "</h3>" +',
-    '      "<div class=\\"saldo-linea\\">Efectivo pendiente: $" + totalEfectivo.toLocaleString("es-AR") + "</div>" +',
-    '      "<div class=\\"saldo-linea\\">Mercadopago pendiente: $" + totalMP.toLocaleString("es-AR") + "</div>" +',
-    '      "<div class=\\"saldo-total\\">Total a descontar: $" + totalGeneral.toLocaleString("es-AR") + "</div>";',
-    '    if (pendientes.length > 0) {',
-    '      html += "<button class=\\"secundario btn-saldar\\" data-nombre=\\"" + nombre + "\\" data-mes=\\"" + mesElegido + "\\">Marcar todo como saldado (ya descontado del sueldo)</button>";',
-    '    }',
-    '    html += "<table class=\\"tabla-adelantos\\"><thead><tr><th>Fecha</th><th>Monto</th><th>Medio</th><th>Nota</th><th></th></tr></thead><tbody>" +',
-    '      lista.map(function(a){',
-    '        return "<tr class=\\"" + (a.saldado ? "saldado" : "") + "\\"><td>" + a.fecha + "</td><td>$" + Number(a.monto).toLocaleString("es-AR") + "</td><td>" + (a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago") + "</td><td>" + (a.nota || "") + "</td><td><button class=\\"btn-danger btn-borrar\\" data-id=\\"" + a.id + "\\">✕</button></td></tr>";',
-    '      }).join("") + "</tbody></table>";',
-    '    div.innerHTML = html;',
-    '    cont.appendChild(div);',
-    '  });',
-    '  document.querySelectorAll(".btn-saldar").forEach(function(btn){',
-    '    btn.addEventListener("click", function(){',
-    '      if (!confirm("¿Confirmás que ya se descontó del sueldo de " + btn.dataset.nombre + "?")) return;',
-    '      fetch("/admin/adelantos-saldar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: btn.dataset.nombre, mes: btn.dataset.mes})})',
-    '        .then(function(r){ return r.json(); })',
-    '        .then(function(){ cargarTodo(); });',
-    '    });',
-    '  });',
-    '  document.querySelectorAll(".btn-borrar").forEach(function(btn){',
+    '  if (!empleadoElegido) { cont.textContent = "Elegí un empleado para ver sus adelantos."; return; }',
+    '  var lista = TODOS.filter(function(a){ return a.empleado === empleadoElegido; }).slice().sort(function(a,b){ return a.fecha.localeCompare(b.fecha); });',
+    '  if (lista.length === 0) { cont.innerHTML = "<div class=\\"empty-state\\"><div class=\\"icono\\">💵</div>" + empleadoElegido + " todavía no tiene adelantos cargados.</div>"; return; }',
+    '  var totalGeneral = lista.reduce(function(s,a){ return s + Number(a.monto); }, 0);',
+    '  var div = document.createElement("div");',
+    '  div.className = "card empleado-card";',
+    '  var html = "<h3>" + empleadoElegido + "</h3>" +',
+    '    "<div class=\\"saldo-total\\">Total adelantado (histórico): $" + totalGeneral.toLocaleString("es-AR") + "</div>";',
+    '  html += "<table class=\\"tabla-adelantos\\"><thead><tr><th>Fecha</th><th>Monto</th><th>Medio</th><th>Nota</th><th></th></tr></thead><tbody>" +',
+    '    lista.map(function(a){',
+    '      return "<tr><td>" + a.fecha.split("-").reverse().join("/") + "</td><td>$" + Number(a.monto).toLocaleString("es-AR") + "</td><td>" + (a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago") + "</td><td>" + (a.nota || "") + "</td><td><button class=\\"btn-danger btn-borrar\\" data-id=\\"" + a.id + "\\">✕</button></td></tr>";',
+    '    }).join("") + "</tbody></table>";',
+    '  div.innerHTML = html;',
+    '  cont.appendChild(div);',
+    '  cont.querySelectorAll(".btn-borrar").forEach(function(btn){',
     '    btn.addEventListener("click", function(){',
     '      if (!confirm("¿Borrar este adelanto?")) return;',
     '      fetch("/admin/adelantos-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: btn.dataset.id})})',
@@ -4835,13 +4864,13 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '    fetch("/admin/empleados-nombres", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})}).then(function(r){ return r.json(); })',
     '  ]).then(function(res){',
     '      TODOS = res[0]; EMPLEADOS = res[1];',
-    '      pintarFiltroMes();',
+    '      pintarFiltroEmpleadoResumen();',
     '      pintarSelectEmpleado();',
     '      pintarResumen();',
     '    })',
     '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("resumen").textContent = "Error: " + e.message; } });',
     '}',
-    'document.getElementById("filtroMes").addEventListener("change", pintarResumen);',
+    'document.getElementById("filtroEmpleadoResumen").addEventListener("change", pintarResumen);',
     'document.getElementById("btnAgregar").addEventListener("click", function(){',
     '  var empleado = document.getElementById("fEmpleado").value.trim();',
     '  var fecha = document.getElementById("fFecha").value;',
