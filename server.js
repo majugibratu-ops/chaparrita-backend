@@ -206,6 +206,119 @@ function saveEmpleados(lista) {
   fs.writeFileSync(EMPLEADOS_PATH, JSON.stringify(lista, null, 2), "utf8");
 }
 
+// Carga automática, UNA sola vez al arrancar el servidor, de los datos de Ruben Alejandro
+// Núñez y sus compañeros que juntamos analizando el chat y el extracto bancario — así Tuti
+// no tiene que tipear ni pegar nada a mano. Es segura de correr en cada reinicio: se fija
+// primero si cada dato ya existe (por nombre, por mes, o por fecha+monto) antes de agregarlo,
+// así nunca duplica nada aunque el servidor se reinicie muchas veces.
+function sembrarDatosPayrollInicial() {
+  try {
+    const empleadosSemilla = [
+      { nombre: "Medina Milagros Natalia", tipo: "normal", cuit: "27-44876369-8", dni: "44876369", direccion: "", telefono: "" },
+      { nombre: "Gonzalez Lourdes Sofia", tipo: "normal", cuit: "27-44344239-7", dni: "44344239", direccion: "Pringles 2015", telefono: "" },
+      { nombre: "Coceres Mariano Nicolás", tipo: "mariano", cuit: "20-42186281-9", dni: "42186281", direccion: "", telefono: "" },
+      { nombre: "Romero Fiorela Katherina", tipo: "normal", cuit: "27-44647321-8", dni: "44647321", direccion: "B° Simón Bolívar Mz 09 Cs 32", telefono: "" },
+      { nombre: "Ruben Alejandro Núñez", tipo: "normal", cuit: "20-32587454-7", dni: "", direccion: "", telefono: "" },
+      { nombre: "Valentina Marieth Gonzalez", tipo: "normal", cuit: "", dni: "", direccion: "", telefono: "" },
+    ];
+    const empleados = loadEmpleados();
+    let cambioEmpleados = false;
+    empleadosSemilla.forEach((e) => {
+      if (!empleados.some((ex) => ex.nombre.toLowerCase() === e.nombre.toLowerCase())) {
+        empleados.push({ id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8), ...e });
+        cambioEmpleados = true;
+      }
+    });
+    if (cambioEmpleados) saveEmpleados(empleados);
+
+    const sueldosSemilla = [
+      { empleado: "Ruben Alejandro Núñez", mes: "2026-06", tipo: "normal", montoRecibo: 508290.47 },
+      { empleado: "Ruben Alejandro Núñez", mes: "2026-07", tipo: "normal", montoRecibo: 799018.52 }, // incluye SAC 1er sem sumado
+    ];
+    const sueldos = loadSueldos();
+    let cambioSueldos = false;
+    sueldosSemilla.forEach((s) => {
+      if (!sueldos.some((ex) => ex.empleado === s.empleado && ex.mes === s.mes)) {
+        sueldos.push({
+          id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          empleado: s.empleado,
+          mes: s.mes,
+          tipo: s.tipo,
+          montoRecibo: s.montoRecibo,
+          total: s.montoRecibo,
+          creadoEn: new Date().toISOString(),
+        });
+        cambioSueldos = true;
+      }
+    });
+    if (cambioSueldos) saveSueldos(sueldos);
+
+    // Adelantos de Ruben (junio, julio, agosto) — ya revisados a fondo contra el chat: se
+    // sacaron los que en realidad eran pago de horas o reintegro de compras, y se sumaron
+    // los que eran en efectivo y no aparecían en el extracto de Mercadopago.
+    const adelantosSemilla = [
+      { fecha: "2026-06-05", monto: 61961.11, medioPago: "mercadopago" },
+      { fecha: "2026-06-07", monto: 21000, medioPago: "mercadopago" },
+      { fecha: "2026-06-18", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-06-26", monto: 100000, medioPago: "mercadopago" },
+      { fecha: "2026-07-05", monto: 150000, medioPago: "mercadopago" },
+      { fecha: "2026-07-10", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-07-12", monto: 20000, medioPago: "mercadopago" },
+      { fecha: "2026-07-15", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-07-16", monto: 20000, medioPago: "mercadopago" },
+      { fecha: "2026-07-18", monto: 50000, medioPago: "efectivo" },
+      { fecha: "2026-07-19", monto: 100000, medioPago: "mercadopago" },
+      { fecha: "2026-07-20", monto: 100000, medioPago: "efectivo" },
+      { fecha: "2026-07-26", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-07-26", monto: 50000, medioPago: "efectivo" },
+      { fecha: "2026-07-27", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-07-30", monto: 12500, medioPago: "mercadopago" },
+      { fecha: "2026-08-02", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-08-03", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-08-06", monto: 30000, medioPago: "mercadopago" },
+      { fecha: "2026-08-08", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-08-11", monto: 32000, medioPago: "mercadopago" },
+      { fecha: "2026-08-15", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-08-17", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-08-21", monto: 36000, medioPago: "mercadopago" },
+      { fecha: "2026-08-23", monto: 50000, medioPago: "mercadopago" },
+      { fecha: "2026-08-23", monto: 30000, medioPago: "mercadopago" },
+    ];
+    const adelantos = loadAdelantos();
+    let cambioAdelantos = false;
+    adelantosSemilla.forEach((a) => {
+      const yaExiste = adelantos.some(
+        (ex) =>
+          ex.empleado === "Ruben Alejandro Núñez" &&
+          ex.fecha === a.fecha &&
+          Math.abs(ex.monto - a.monto) < 0.01 &&
+          ex.medioPago === a.medioPago
+      );
+      if (!yaExiste) {
+        adelantos.push({
+          id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          empleado: "Ruben Alejandro Núñez",
+          fecha: a.fecha,
+          monto: a.monto,
+          medioPago: a.medioPago,
+          nota: "Cargado automáticamente desde el análisis del chat — revisar",
+          saldado: false,
+          creadoEn: new Date().toISOString(),
+        });
+        cambioAdelantos = true;
+      }
+    });
+    if (cambioAdelantos) saveAdelantos(adelantos);
+
+    if (cambioEmpleados || cambioSueldos || cambioAdelantos) {
+      console.log("Datos iniciales de sueldos/adelantos de Ruben cargados automáticamente.");
+    }
+  } catch (err) {
+    console.error("Error sembrando datos iniciales de payroll:", err);
+  }
+}
+sembrarDatosPayrollInicial();
+
 const MENU_PATH = path.join(DATA_DIR, "menu.txt");
 function loadMenuText() {
   try {
