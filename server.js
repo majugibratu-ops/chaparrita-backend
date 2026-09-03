@@ -1575,7 +1575,6 @@ const {
   FUDO_API_KEY,
   FUDO_API_SECRET,
   ES_STAGING,
-  SUELDOS_PASSWORD,
   PORT = 3000,
 } = process.env;
 
@@ -1583,7 +1582,9 @@ const {
 // Antes cada página del panel pedía la contraseña por separado. Ahora te logueás una
 // vez en /admin/login y esa sesión te sirve para todas las páginas del panel por 12hs.
 const crypto = require("crypto");
-const ADMIN_SESSIONS = new Map(); // token -> timestamp de expiración (ms)
+// token -> { expira: timestamp (ms), rol: string, nombre: string, usuarioId: string|null }
+// usuarioId es null para el login con la contraseña general (el "dueño" de toda la vida).
+const ADMIN_SESSIONS = new Map();
 const ADMIN_SESSION_COOKIE = "chap_admin_sesion";
 const ADMIN_SESSION_DURATION_MS = 12 * 60 * 60 * 1000; // 12 horas
 
@@ -1601,21 +1602,33 @@ function parseCookies(req) {
   return cookies;
 }
 
-function tieneSesionAdminValida(req) {
+// Devuelve los datos de la sesión (rol, nombre, etc.) o null si no hay sesión válida.
+function obtenerDatosSesionAdmin(req) {
   const cookies = parseCookies(req);
   const token = cookies[ADMIN_SESSION_COOKIE];
-  if (!token) return false;
-  const expira = ADMIN_SESSIONS.get(token);
-  if (!expira || expira < Date.now()) {
+  if (!token) return null;
+  const datos = ADMIN_SESSIONS.get(token);
+  if (!datos || datos.expira < Date.now()) {
     ADMIN_SESSIONS.delete(token);
-    return false;
+    return null;
   }
-  return true;
+  return datos;
 }
 
-function crearSesionAdmin(res) {
+function tieneSesionAdminValida(req) {
+  return !!obtenerDatosSesionAdmin(req);
+}
+
+// datosUsuario: { rol, nombre, usuarioId } — si se omite, sesión de "dueño" (compatibilidad
+// con el login de siempre, contraseña única = acceso total).
+function crearSesionAdmin(res, datosUsuario) {
   const token = crypto.randomBytes(24).toString("hex");
-  ADMIN_SESSIONS.set(token, Date.now() + ADMIN_SESSION_DURATION_MS);
+  const datos = Object.assign(
+    { rol: "dueño", nombre: "Dueño", usuarioId: null },
+    datosUsuario || {},
+    { expira: Date.now() + ADMIN_SESSION_DURATION_MS }
+  );
+  ADMIN_SESSIONS.set(token, datos);
   res.setHeader(
     "Set-Cookie",
     `${ADMIN_SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(ADMIN_SESSION_DURATION_MS / 1000)}; SameSite=Lax`
@@ -1659,15 +1672,17 @@ app.get("/admin/login", (_req, res) => {
     '<div class="login-shell">',
     `<div class="login-icono">${logoLoginHtml}</div>`,
     '<h1>Panel de Chaparrita</h1>',
-    '<p class="sub">Ingresá la contraseña de administrador una vez, y no te la vuelve a pedir por unas horas.</p>',
-    '<input type="password" id="password" placeholder="Contraseña" autofocus />',
+    '<p class="sub">Si tenés usuario propio, completá los dos campos. Si sos el dueño, dejá "Usuario" vacío y entrá solo con la contraseña de siempre.</p>',
+    '<input type="text" id="usuario" placeholder="Usuario (dejar vacío si sos el dueño)" style="margin-bottom:10px" />',
+    '<input type="password" id="password" placeholder="Contraseña" />',
     '<button class="btn-primary" id="btnEntrar">Entrar</button>',
     '<div id="msg"></div>',
     '</div>',
     '<script>',
     'function intentarEntrar() {',
     '  var pw = document.getElementById("password").value;',
-    '  fetch("/admin/login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
+    '  var usr = document.getElementById("usuario").value;',
+    '  fetch("/admin/login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw, usuario: usr})})',
     '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
     '    .then(function(){ window.location.href = "/admin"; })',
     '    .catch(function(e){ document.getElementById("msg").textContent = e.message; document.getElementById("msg").className = "msg-error"; });',
@@ -1679,11 +1694,42 @@ app.get("/admin/login", (_req, res) => {
   ].join("\n"));
 });
 
+// ---- Contraseñas de usuarios individuales: hash + salt con crypto (sin dependencias nuevas) ----
+function hashPassword(password, salt) {
+  const s = salt || crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, s, 64).toString("hex");
+  return { salt: s, hash };
+}
+function verificarPassword(password, salt, hash) {
+  if (!salt || !hash) return false;
+  const intento = crypto.scryptSync(password, salt, 64).toString("hex");
+  const bufA = Buffer.from(intento, "hex");
+  const bufB = Buffer.from(hash, "hex");
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
 app.post("/admin/login-check", (req, res) => {
-  if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
+  const usuarioIngresado = (req.body.usuario || "").trim();
+
+  // Sin usuario: es el login de siempre, con la contraseña general (acceso total, rol "dueño").
+  if (!usuarioIngresado) {
+    if (!ADMIN_PASSWORD || req.body.password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    }
+    crearSesionAdmin(res, { rol: "dueño", nombre: "Dueño", usuarioId: null });
+    return res.json({ ok: true });
   }
-  crearSesionAdmin(res);
+
+  // Con usuario: busca en la lista de usuarios individuales del panel.
+  const config = loadConfig();
+  const usuarios = config.usuariosPanel || [];
+  const u = usuarios.find(
+    (x) => x.activo !== false && (x.usuario || "").toLowerCase() === usuarioIngresado.toLowerCase()
+  );
+  if (!u || !verificarPassword(req.body.password || "", u.salt, u.hash)) {
+    return res.status(401).json({ error: "Usuario o contraseña incorrectos" });
+  }
+  crearSesionAdmin(res, { rol: u.rol, nombre: u.nombre || u.usuario, usuarioId: u.id });
   res.json({ ok: true });
 });
 
@@ -1692,86 +1738,84 @@ app.get("/admin/logout", (req, res) => {
   res.redirect("/admin/login");
 });
 
-// ==================== Segunda contraseña, solo para /admin/sueldos ====================
-// Datos de sueldos son más sensibles que el resto del panel, así que además de la
-// contraseña general de /admin, pide una segunda y propia para entrar acá.
-const SUELDOS_SESSIONS = new Map();
-const SUELDOS_SESSION_COOKIE = "chap_sueldos_sesion";
-const SUELDOS_SESSION_DURATION_MS = 4 * 60 * 60 * 1000; // 4hs — más corta que la general, a propósito
+// ==================== Roles y permisos del panel ====================
+// Cada persona con usuario propio tiene un rol, y cada rol tiene permiso sobre ciertas
+// "secciones" del panel (no ruta por ruta, para no tener que tocar cada endpoint).
+// El login con la contraseña general (rol "dueño") siempre tiene acceso total, así
+// nunca te podés quedar afuera de tu propio panel.
+const SECCIONES_PANEL = [
+  { id: "menu", nombre: "Menú", prefijos: ["/admin/menu", "/admin/upload-menu", "/admin/upload-logo"] },
+  { id: "clientes", nombre: "Clientes", prefijos: ["/admin/clientes"] },
+  { id: "postulantes", nombre: "Postulantes", prefijos: ["/admin/postulantes"] },
+  { id: "listaespera", nombre: "Lista de espera", prefijos: ["/admin/listaespera"] },
+  { id: "reservas", nombre: "Reservas", prefijos: ["/admin/reservas"] },
+  { id: "compras", nombre: "Lista de compras", prefijos: ["/admin/compras"] },
+  { id: "sueldos", nombre: "Sueldos y empleados", prefijos: ["/admin/sueldos", "/admin/empleados-data", "/admin/empleados-agregar", "/admin/empleados-importar-masivo", "/admin/empleados-editar", "/admin/empleados-borrar", "/admin/cuenta-corriente-pdf", "/admin/resumen-empleado"] },
+  // /admin/empleados-nombres queda deliberadamente FUERA de "sueldos": es el endpoint liviano
+  // (solo nombres, sin datos sensibles) que usa la página de Adelantos, y no debe exigir el
+  // permiso de sueldos ni la segunda contraseña — así se diseñó originalmente.
+  { id: "adelantos", nombre: "Adelantos", prefijos: ["/admin/adelantos", "/admin/empleados-nombres"] },
+  { id: "facturas", nombre: "Facturas y FUDO", prefijos: ["/admin/facturas", "/admin/factura-categorias-save", "/admin/fudo-stock", "/admin/fudo-ingredientes", "/admin/fudo-producto", "/admin/fudo-proveedor"] },
+  { id: "inbox", nombre: "Atención manual", prefijos: ["/admin/inbox"] },
+  { id: "switch", nombre: "Encender/apagar asistente", prefijos: ["/admin/switch"] },
+  { id: "config", nombre: "Configuración general", prefijos: ["/admin/config", "/admin/importar-config-desde-produccion", "/admin/config-reset-from-repo"] },
+  { id: "inactivos", nombre: "Clientes inactivos", prefijos: ["/admin/inactivos"] },
+  { id: "backup", nombre: "Backup manual", prefijos: ["/admin/backup-ahora"] },
+  { id: "usuarios", nombre: "Usuarios y roles", prefijos: ["/admin/usuarios"] },
+];
 
-function tieneSesionSueldosValida(req) {
-  const cookies = parseCookies(req);
-  const token = cookies[SUELDOS_SESSION_COOKIE];
-  if (!token) return false;
-  const expira = SUELDOS_SESSIONS.get(token);
-  if (!expira || expira < Date.now()) {
-    SUELDOS_SESSIONS.delete(token);
-    return false;
+const ROLES_PANEL_POR_DEFECTO = {
+  dueño: ["*"],
+  encargado: ["menu", "clientes", "postulantes", "listaespera", "reservas", "compras", "facturas", "inbox", "switch", "inactivos", "backup"],
+  cajero: ["clientes", "listaespera", "reservas", "inbox"],
+  cocina: ["compras"],
+};
+
+// Secciones que son SIEMPRE exclusivas del dueño — no aparecen en el editor de permisos
+// por rol y no se pueden habilitar para nadie más, ni siquiera editando config.rolesPanel
+// a mano. Sueldos y Adelantos manejan plata y datos personales de los empleados.
+const SECCIONES_SOLO_DUENO = ["sueldos", "adelantos", "usuarios"];
+
+function seccionDeRuta(rutaPath) {
+  for (const s of SECCIONES_PANEL) {
+    if (s.prefijos.some((p) => rutaPath === p || rutaPath.startsWith(p))) return s.id;
   }
-  return true;
+  return null; // /admin (dashboard), /admin/login, /admin/usuarios-data, etc. — no restringidas por sí solas
 }
 
-function crearSesionSueldos(res) {
-  const token = crypto.randomBytes(24).toString("hex");
-  SUELDOS_SESSIONS.set(token, Date.now() + SUELDOS_SESSION_DURATION_MS);
-  res.setHeader(
-    "Set-Cookie",
-    `${SUELDOS_SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SUELDOS_SESSION_DURATION_MS / 1000)}; SameSite=Lax`
-  );
+function permisosDelRol(config, rol) {
+  const roles = Object.assign({}, ROLES_PANEL_POR_DEFECTO, config.rolesPanel || {});
+  const permisos = roles[rol];
+  if (!permisos) return [];
+  return permisos.includes("*") ? "*" : permisos;
 }
 
-// Middleware para la página HTML de /admin/sueldos: pide la sesión general de admin
-// (requireAdminPage ya se aplica antes) Y, encima, esta segunda sesión propia.
-function requireSueldosPage(req, res, next) {
-  if (tieneSesionSueldosValida(req)) return next();
-  return res.redirect("/admin/sueldos-login");
+function tienePermisoSeccion(config, sesion, seccionId) {
+  if (!sesion) return false;
+  if (sesion.rol === "dueño") return true;
+  if (SECCIONES_SOLO_DUENO.includes(seccionId)) return false;
+  const permisos = permisosDelRol(config, sesion.rol);
+  return permisos === "*" || permisos.includes(seccionId);
 }
 
-function requireSueldosApi(req, res, next) {
-  if (tieneSesionSueldosValida(req)) return next();
-  return res.status(401).json({ error: "Sesión de sueldos vencida, iniciá sesión de nuevo." });
-}
-
-app.get("/admin/sueldos-login", requireAdminPage, (_req, res) => {
-  res.type("html").send([
-    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
-    '<title>Chaparrita - Sueldos</title>',
-    `<style>${ADMIN_BASE_CSS}
-      .login-shell { max-width: 380px; margin: 100px auto; text-align: center; padding: 0 20px; }
-      .login-icono { width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 18px; display: flex; align-items: center; justify-content: center; font-size: 30px; background: linear-gradient(135deg, var(--verde-wa-oscuro), var(--verde-wa)); box-shadow: var(--sombra); }
-      .login-shell input[type=password] { text-align: center; font-size: 16px; padding: 13px; }
-      .login-shell button { width: 100%; padding: 13px; font-size: 14.5px; }
-    </style>`,
-    '</head><body>',
-    '<div class="login-shell">',
-    '<div class="login-icono">🔒</div>',
-    '<h1>Sueldos</h1>',
-    '<p class="sub">Esta sección tiene una contraseña aparte de la del panel general.</p>',
-    '<input type="password" id="password" placeholder="Contraseña de sueldos" autofocus />',
-    '<button class="btn-primary" id="btnEntrar">Entrar</button>',
-    '<div id="msg"></div>',
-    '</div>',
-    '<script>',
-    'function intentarEntrar() {',
-    '  var pw = document.getElementById("password").value;',
-    '  fetch("/admin/sueldos-login-check", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({password: pw})})',
-    '    .then(function(r){ if (!r.ok) { throw new Error("Contraseña incorrecta"); } return r.json(); })',
-    '    .then(function(){ window.location.href = "/admin/sueldos"; })',
-    '    .catch(function(e){ document.getElementById("msg").textContent = e.message; document.getElementById("msg").className = "msg-error"; });',
-    '}',
-    'document.getElementById("btnEntrar").addEventListener("click", intentarEntrar);',
-    'document.getElementById("password").addEventListener("keydown", function(e){ if (e.key === "Enter") intentarEntrar(); });',
-    '</' + 'script>',
-    '</body></html>'
-  ].join("\n"));
-});
-
-app.post("/admin/sueldos-login-check", requireAdminApi, (req, res) => {
-  if (!SUELDOS_PASSWORD || req.body.password !== SUELDOS_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña incorrecta" });
-  }
-  crearSesionSueldos(res);
-  res.json({ ok: true });
+// Middleware global: se aplica a toda request bajo /admin, ANTES que las rutas puntuales
+// más abajo. Si la ruta no pertenece a ninguna sección restringible, no hace nada (deja
+// pasar y que requireAdminPage/requireAdminApi de cada ruta decidan). Si el usuario no
+// está logueado todavía, tampoco hace nada acá — eso lo corta el requireAdminPage/Api de
+// siempre. Solo actúa cuando SÍ hay sesión y la sección tiene dueño restringido.
+app.use("/admin", (req, res, next) => {
+  // OJO: dentro de un app.use("/admin", ...), Express recorta "/admin" de req.path.
+  // Reconstruimos la ruta completa con baseUrl + path para poder compararla contra
+  // los prefijos de SECCIONES_PANEL (que sí incluyen "/admin/...").
+  const rutaCompleta = req.baseUrl + req.path;
+  const seccion = seccionDeRuta(rutaCompleta);
+  if (!seccion) return next();
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (!sesion) return next();
+  const config = loadConfig();
+  if (tienePermisoSeccion(config, sesion, seccion)) return next();
+  if (req.method === "GET") return res.redirect("/admin?sinPermiso=1");
+  return res.status(403).json({ error: "Tu usuario no tiene permiso para esta sección del panel." });
 });
 
 // ==================== Verificación del webhook (Meta) ====================
@@ -3177,8 +3221,9 @@ async function subirYEnviarDocumentoWhatsapp(to, buffer, filename, mimetype, cap
 app.get("/", (_req, res) => res.send("Chaparrita agente — backend activo ✅"));
 
 // ==================== Panel de administración ====================
-app.get("/admin", requireAdminPage, (_req, res) => {
+app.get("/admin", requireAdminPage, (req, res) => {
   const config = loadConfig();
+  const sesion = obtenerDatosSesionAdmin(req);
   const marca = config.panelMarca || {};
   const tituloHero = marca.tituloHero || "Todo Chaparrita, en un solo lugar";
   const subtituloHero = marca.subtituloHero || "Clientes, reservas, pedidos, compras y la configuración del agente — organizado por función, para encontrar todo rápido.";
@@ -3219,11 +3264,23 @@ app.get("/admin", requireAdminPage, (_req, res) => {
       items: [
         { href: "/admin/menu", icono: "📄", titulo: "Actualizar el menú", desc: "Subir un PDF nuevo con precios y productos." },
         { href: "/admin/config", icono: "⚙️", titulo: "Configuración", desc: "Precios, horarios, promos, equipo y teléfonos." },
+        ...(sesion && sesion.rol === "dueño" ? [{ href: "/admin/usuarios", icono: "👤", titulo: "Usuarios y roles", desc: "Altas, bajas y qué puede tocar cada rol del panel." }] : []),
       ],
     },
   ];
 
-  const seccionesHtml = CATS.map((cat) => `
+  // Cada persona ve solo las tarjetas de las secciones que su rol tiene habilitadas.
+  // El dueño (o cualquiera sin sesión con rol reconocido) ve todo, como siempre.
+  function puedeVerTarjeta(href) {
+    if (!sesion || sesion.rol === "dueño") return true;
+    const seccion = seccionDeRuta(href);
+    if (!seccion) return true; // no restringible
+    return tienePermisoSeccion(config, sesion, seccion);
+  }
+  CATS.forEach((cat) => { cat.items = cat.items.filter((it) => puedeVerTarjeta(it.href)); });
+  const CATS_VISIBLES = CATS.filter((cat) => cat.items.length > 0);
+
+  const seccionesHtml = CATS_VISIBLES.map((cat) => `
         <div class="chap-seccion">
           <div class="chap-eyebrow"><span class="dot" style="background:${cat.acento}"></span>${cat.emoji} ${cat.nombre}</div>
           <div class="chap-grid">
@@ -3289,7 +3346,7 @@ app.get("/admin", requireAdminPage, (_req, res) => {
         <div class="topbar">
           <div class="marca">
             <div class="icono">${logoHtml}</div>
-            <div><b>Chaparrita</b><span>Panel de administración</span></div>
+            <div><b>Chaparrita</b><span>${sesion ? `${sesion.nombre} · ${sesion.rol}` : "Panel de administración"}</span></div>
           </div>
           <a class="logout" href="/admin/logout">Cerrar sesión ⏻</a>
         </div>
@@ -4160,11 +4217,11 @@ app.post("/admin/empleados-nombres", requireAdminApi, (_req, res) => {
   res.json(loadEmpleados().map((e) => ({ id: e.id, nombre: e.nombre, tipo: e.tipo })));
 });
 
-app.post("/admin/empleados-data", requireAdminApi, requireSueldosApi, (_req, res) => {
+app.post("/admin/empleados-data", requireAdminApi, (_req, res) => {
   res.json(loadEmpleados());
 });
 
-app.post("/admin/empleados-agregar", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/empleados-agregar", requireAdminApi, (req, res) => {
   try {
     const { nombre, tipo, cuit, dni, direccion, telefono } = req.body;
     if (!nombre || !["normal", "mariano"].includes(tipo)) {
@@ -4194,7 +4251,7 @@ app.post("/admin/empleados-agregar", requireAdminApi, requireSueldosApi, (req, r
 // Carga varios empleados de una sola vez. Formato, una línea por empleado:
 // nombre|tipo|cuit|dni|direccion|telefono  (cuit/dni/direccion/telefono son opcionales,
 // dejar vacío entre las barras si no se sabe todavía — ej: "Ruben Alejandro Núñez|normal|20-32587454-7|||")
-app.post("/admin/empleados-importar-masivo", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/empleados-importar-masivo", requireAdminApi, (req, res) => {
   try {
     const { texto } = req.body;
     if (!texto || !texto.trim()) {
@@ -4234,7 +4291,7 @@ app.post("/admin/empleados-importar-masivo", requireAdminApi, requireSueldosApi,
   }
 });
 
-app.post("/admin/empleados-editar", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/empleados-editar", requireAdminApi, (req, res) => {
   try {
     const { id, nombre, tipo, cuit, dni, direccion, telefono } = req.body;
     if (!id || !nombre || !["normal", "mariano"].includes(tipo)) {
@@ -4260,7 +4317,7 @@ app.post("/admin/empleados-editar", requireAdminApi, requireSueldosApi, (req, re
   }
 });
 
-app.post("/admin/empleados-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/empleados-borrar", requireAdminApi, (req, res) => {
   try {
     const { id } = req.body;
     saveEmpleados(loadEmpleados().filter((e) => e.id !== id));
@@ -4271,7 +4328,7 @@ app.post("/admin/empleados-borrar", requireAdminApi, requireSueldosApi, (req, re
   }
 });
 
-app.get("/admin/sueldos", requireAdminPage, requireSueldosPage, (_req, res) => {
+app.get("/admin/sueldos", requireAdminPage, (_req, res) => {
   const html = [
     '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Chaparrita - Sueldos mensuales</title>',
@@ -4666,11 +4723,11 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
   res.type("html").send(html);
 });
 
-app.post("/admin/sueldos-data", requireAdminApi, requireSueldosApi, (_req, res) => {
+app.post("/admin/sueldos-data", requireAdminApi, (_req, res) => {
   res.json(loadSueldos());
 });
 
-app.post("/admin/sueldos-agregar", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/sueldos-agregar", requireAdminApi, (req, res) => {
   try {
     const { empleado, mes, tipo, montoRecibo, montoDeclarado, montoBase } = req.body;
     if (!empleado || !mes || !["normal", "mariano"].includes(tipo)) {
@@ -4708,7 +4765,7 @@ app.post("/admin/sueldos-agregar", requireAdminApi, requireSueldosApi, (req, res
 // tipo normal:  mes|normal|montoRecibo
 // tipo mariano: mes|mariano|montoDeclarado|montoBase
 // Ejemplo: 2026-06|normal|508290.47
-app.post("/admin/sueldos-importar-masivo", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/sueldos-importar-masivo", requireAdminApi, (req, res) => {
   try {
     const { empleado, texto } = req.body;
     if (!empleado || !texto || !texto.trim()) {
@@ -4763,7 +4820,7 @@ app.post("/admin/sueldos-importar-masivo", requireAdminApi, requireSueldosApi, (
   }
 });
 
-app.post("/admin/sueldos-borrar", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/sueldos-borrar", requireAdminApi, (req, res) => {
   try {
     const { id } = req.body;
     const lista = loadSueldos().filter((s) => s.id !== id);
@@ -4899,7 +4956,7 @@ async function generarPdfCuentaCorriente(empleadoInfo, cuenta) {
   return await pdfDoc.save();
 }
 
-app.post("/admin/cuenta-corriente-pdf", requireAdminApi, requireSueldosApi, async (req, res) => {
+app.post("/admin/cuenta-corriente-pdf", requireAdminApi, async (req, res) => {
   try {
     const { empleado } = req.body;
     if (!empleado) return res.status(400).json({ error: "Falta el empleado" });
@@ -4915,7 +4972,7 @@ app.post("/admin/cuenta-corriente-pdf", requireAdminApi, requireSueldosApi, asyn
   }
 });
 
-app.post("/admin/resumen-empleado", requireAdminApi, requireSueldosApi, (req, res) => {
+app.post("/admin/resumen-empleado", requireAdminApi, (req, res) => {
   try {
     const { empleado } = req.body;
     if (!empleado) {
@@ -5008,7 +5065,7 @@ app.get("/admin/adelantos", requireAdminPage, (_req, res) => {
     '</div>',
 
     '<h2>Adelantos por empleado</h2>',
-    '<p class="sub" style="margin-top:-6px">Listado simple, ordenado por fecha. Para ver el saldo real (sueldo menos adelantos) entrá a <a href="/admin/sueldos">/admin/sueldos</a> — esa pantalla tiene una segunda contraseña porque cruza datos de sueldo.</p>',
+    '<p class="sub" style="margin-top:-6px">Listado simple, ordenado por fecha. Para ver el saldo real (sueldo menos adelantos) entrá a <a href="/admin/sueldos">/admin/sueldos</a> — esa pantalla es solo para el dueño.</p>',
     '<div class="filtro-mes">Empleado: <select id="filtroEmpleadoResumen"><option value="">Elegí un empleado...</option></select></div>',
     '<div id="resumen">Elegí un empleado para ver sus adelantos.</div>',
 
@@ -6461,6 +6518,227 @@ app.post("/admin/config-reset-from-repo", requireAdminApi, (req, res) => {
     console.error("Error al restaurar config desde el repo:", err);
     res.status(500).json({ error: "No se pudo restaurar" });
   }
+});
+
+// ==================== Usuarios y roles del panel ====================
+// Solo el dueño (login con la contraseña general) puede entrar acá — "usuarios" no
+// está en ningún rol por defecto, y solo el dueño la puede agregar a un rol.
+app.get("/admin/usuarios", requireAdminPage, (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.redirect("/admin?sinPermiso=1");
+  res.type("html").send(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Chaparrita — Usuarios y roles</title>
+      <style>${ADMIN_BASE_CSS}
+        .tabla-usuarios { width: 100%; border-collapse: collapse; margin-top: 16px; }
+        .tabla-usuarios th, .tabla-usuarios td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--borde); font-size: 13.5px; }
+        .rol-pill { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11.5px; font-weight: 700; background: var(--bg-elevado); border: 1px solid var(--borde); }
+        .form-usuario { background: var(--card); border: 1px solid var(--borde); border-radius: 14px; padding: 18px; margin-top: 18px; max-width: 420px; }
+        .form-usuario input, .form-usuario select { width: 100%; margin-bottom: 10px; }
+        .permisos-rol { background: var(--card); border: 1px solid var(--borde); border-radius: 14px; padding: 18px; margin-top: 24px; }
+        .permisos-rol label { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 5px 0; }
+        .permisos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px 18px; margin-top: 8px; }
+      </style>
+    </head>
+    <body>
+      <div class="contenedor-ancho">
+        <div class="topbar">
+          <div class="marca"><div class="icono">👤</div><div><b>Usuarios y roles</b><span>Quién puede entrar al panel, y qué puede tocar</span></div></div>
+          <a class="logout" href="/admin">← Volver</a>
+        </div>
+
+        <p class="sub">La contraseña general (la de siempre) sigue siendo tu acceso de dueño, con todo habilitado. Acá agregás usuarios para el resto del equipo, cada uno con su propio usuario/contraseña y un rol que decide qué secciones del panel puede ver.</p>
+
+        <h3>Roles y qué puede tocar cada uno</h3>
+        <p class="sub">Sueldos, Adelantos y este mismo panel de Usuarios quedan siempre reservados al dueño — no aparecen abajo porque no se pueden asignar a otro rol. El resto lo podés ajustar libremente.</p>
+        <div id="permisosRoles"></div>
+
+        <h3 style="margin-top:30px">Personas con usuario propio</h3>
+        <div id="listaUsuarios">Cargando...</div>
+
+        <div class="form-usuario">
+          <h4 id="tituloForm" style="margin-top:0">Agregar usuario</h4>
+          <input type="hidden" id="usuarioId" value="">
+          <input type="text" id="uNombre" placeholder="Nombre (ej: Valentina)">
+          <input type="text" id="uUsuario" placeholder="Usuario para entrar (ej: valentina)">
+          <input type="password" id="uPassword" placeholder="Contraseña (dejar vacío para no cambiarla al editar)">
+          <select id="uRol">
+            <option value="encargado">Encargado/a</option>
+            <option value="cajero">Cajero/a</option>
+            <option value="cocina">Cocina</option>
+          </select>
+          <button class="btn-primary" id="btnGuardarUsuario">Guardar</button>
+          <button class="secundario" id="btnCancelarEdicion" style="display:none">Cancelar edición</button>
+          <div id="msgUsuario" style="margin-top:8px"></div>
+        </div>
+      </div>
+      <script>
+        var SECCIONES = ${JSON.stringify(SECCIONES_PANEL.filter((s) => !SECCIONES_SOLO_DUENO.includes(s.id)).map((s) => ({ id: s.id, nombre: s.nombre })))};
+        var ROLES_EDITABLES = ["encargado", "cajero", "cocina"];
+        var rolesActuales = {};
+        var usuarios = [];
+
+        function cargarTodo() {
+          fetch("/admin/usuarios-data").then(function(r){ return r.json(); }).then(function(data){
+            usuarios = data.usuarios || [];
+            rolesActuales = data.rolesPanel || {};
+            pintarPermisos();
+            pintarUsuarios();
+          });
+        }
+
+        function pintarPermisos() {
+          var html = "";
+          ROLES_EDITABLES.forEach(function(rol){
+            var permisos = rolesActuales[rol] || [];
+            html += '<div class="permisos-rol"><b>' + rol.charAt(0).toUpperCase() + rol.slice(1) + '</b><div class="permisos-grid">';
+            SECCIONES.forEach(function(s){
+              var checked = permisos.indexOf(s.id) !== -1 ? "checked" : "";
+              html += '<label><input type="checkbox" data-rol="' + rol + '" data-seccion="' + s.id + '" ' + checked + ' onchange="togglePermiso(this)"> ' + s.nombre + '</label>';
+            });
+            html += '</div></div>';
+          });
+          document.getElementById("permisosRoles").innerHTML = html;
+        }
+
+        function togglePermiso(el) {
+          var rol = el.getAttribute("data-rol");
+          var seccion = el.getAttribute("data-seccion");
+          var permisos = rolesActuales[rol] || [];
+          var idx = permisos.indexOf(seccion);
+          if (el.checked && idx === -1) permisos.push(seccion);
+          if (!el.checked && idx !== -1) permisos.splice(idx, 1);
+          rolesActuales[rol] = permisos;
+          fetch("/admin/usuarios-roles-guardar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rolesPanel: rolesActuales})});
+        }
+
+        function pintarUsuarios() {
+          if (!usuarios.length) { document.getElementById("listaUsuarios").innerHTML = '<p class="sub">Todavía no agregaste a nadie — solo existe tu acceso de dueño.</p>'; return; }
+          var filas = usuarios.map(function(u){
+            return '<tr><td>' + u.nombre + '</td><td>' + u.usuario + '</td><td><span class="rol-pill">' + u.rol + '</span></td><td>' + (u.activo === false ? "Inactivo" : "Activo") + '</td>' +
+              '<td><button class="secundario" onclick="editarUsuario(\\'' + u.id + '\\')">Editar</button> <button class="secundario" onclick="borrarUsuario(\\'' + u.id + '\\')">Borrar</button></td></tr>';
+          }).join("");
+          document.getElementById("listaUsuarios").innerHTML = '<table class="tabla-usuarios"><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th></th></tr>' + filas + '</table>';
+        }
+
+        function editarUsuario(id) {
+          var u = usuarios.find(function(x){ return x.id === id; });
+          if (!u) return;
+          document.getElementById("usuarioId").value = u.id;
+          document.getElementById("uNombre").value = u.nombre;
+          document.getElementById("uUsuario").value = u.usuario;
+          document.getElementById("uPassword").value = "";
+          document.getElementById("uRol").value = u.rol;
+          document.getElementById("tituloForm").textContent = "Editando a " + u.nombre;
+          document.getElementById("btnCancelarEdicion").style.display = "inline-block";
+        }
+
+        function borrarUsuario(id) {
+          if (!confirm("¿Borrar este usuario? Ya no va a poder entrar al panel.")) return;
+          fetch("/admin/usuarios-borrar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: id})})
+            .then(function(){ cargarTodo(); });
+        }
+
+        document.getElementById("btnCancelarEdicion").addEventListener("click", function(){
+          document.getElementById("usuarioId").value = "";
+          document.getElementById("uNombre").value = "";
+          document.getElementById("uUsuario").value = "";
+          document.getElementById("uPassword").value = "";
+          document.getElementById("tituloForm").textContent = "Agregar usuario";
+          this.style.display = "none";
+        });
+
+        document.getElementById("btnGuardarUsuario").addEventListener("click", function(){
+          var msg = document.getElementById("msgUsuario");
+          var body = {
+            id: document.getElementById("usuarioId").value || null,
+            nombre: document.getElementById("uNombre").value.trim(),
+            usuario: document.getElementById("uUsuario").value.trim(),
+            password: document.getElementById("uPassword").value,
+            rol: document.getElementById("uRol").value,
+          };
+          if (!body.nombre || !body.usuario) { msg.textContent = "Faltan datos"; return; }
+          if (!body.id && !body.password) { msg.textContent = "La contraseña es obligatoria para un usuario nuevo"; return; }
+          fetch("/admin/usuarios-guardar", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              if (data.error) { msg.textContent = "❌ " + data.error; return; }
+              msg.textContent = "✅ Guardado";
+              document.getElementById("btnCancelarEdicion").click();
+              cargarTodo();
+            });
+        });
+
+        cargarTodo();
+      ${"</" + "script>"}
+    </body>
+    </html>
+  `);
+});
+
+app.post("/admin/usuarios-data", requireAdminApi, (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.status(403).json({ error: "Sin permiso" });
+  const config = loadConfig();
+  const usuarios = (config.usuariosPanel || []).map((u) => ({ id: u.id, nombre: u.nombre, usuario: u.usuario, rol: u.rol, activo: u.activo !== false }));
+  res.json({ usuarios, rolesPanel: Object.assign({}, ROLES_PANEL_POR_DEFECTO, config.rolesPanel || {}) });
+});
+
+app.post("/admin/usuarios-guardar", requireAdminApi, (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.status(403).json({ error: "Sin permiso" });
+  const { id, nombre, usuario, password, rol } = req.body;
+  if (!nombre || !usuario || !rol) return res.status(400).json({ error: "Faltan datos" });
+  const config = loadConfig();
+  const usuarios = config.usuariosPanel || [];
+  const usuarioNormalizado = usuario.trim().toLowerCase();
+
+  const yaExiste = usuarios.find((u) => u.usuario.toLowerCase() === usuarioNormalizado && u.id !== id);
+  if (yaExiste) return res.status(400).json({ error: "Ya existe otro usuario con ese nombre de acceso" });
+
+  if (id) {
+    const u = usuarios.find((x) => x.id === id);
+    if (!u) return res.status(404).json({ error: "No existe ese usuario" });
+    u.nombre = nombre;
+    u.usuario = usuarioNormalizado;
+    u.rol = rol;
+    if (password) Object.assign(u, hashPassword(password));
+  } else {
+    if (!password) return res.status(400).json({ error: "La contraseña es obligatoria" });
+    usuarios.push(Object.assign(
+      { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), nombre, usuario: usuarioNormalizado, rol, activo: true },
+      hashPassword(password)
+    ));
+  }
+  config.usuariosPanel = usuarios;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  res.json({ ok: true });
+});
+
+app.post("/admin/usuarios-borrar", requireAdminApi, (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.status(403).json({ error: "Sin permiso" });
+  const config = loadConfig();
+  config.usuariosPanel = (config.usuariosPanel || []).filter((u) => u.id !== req.body.id);
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  res.json({ ok: true });
+});
+
+app.post("/admin/usuarios-roles-guardar", requireAdminApi, (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.status(403).json({ error: "Sin permiso" });
+  const config = loadConfig();
+  const rolesRecibidos = req.body.rolesPanel || {};
+  // Por más que llegue algo distinto desde el front, nunca se guardan las secciones
+  // exclusivas del dueño (sueldos/adelantos/usuarios) dentro de otro rol.
+  const rolesLimpios = {};
+  Object.keys(rolesRecibidos).forEach((rol) => {
+    rolesLimpios[rol] = (rolesRecibidos[rol] || []).filter((s) => !SECCIONES_SOLO_DUENO.includes(s));
+  });
+  config.rolesPanel = rolesLimpios;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  res.json({ ok: true });
 });
 
 // ==================== Clientes inactivos (dejaron de pedir) ====================
