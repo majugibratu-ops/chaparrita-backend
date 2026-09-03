@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 const AdmZip = require("adm-zip");
+const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 const pdfParse = require("pdf-parse");
 const { buildSystemPrompt } = require("./systemPrompt");
 
@@ -256,6 +257,8 @@ function sembrarDatosPayrollInicial() {
           tipo: s.tipo,
           ...registro,
           total,
+          concepto: s.concepto || undefined, // etiqueta personalizada opcional (ej: "SAC 1er semestre 2026"), en vez de "Sueldo <mes>"
+          fecha: s.fecha || undefined, // fecha personalizada opcional para ordenar en la cuenta corriente, en vez de "<mes>-01"
           creadoEn: new Date().toISOString(),
         });
         cambioSueldos = true;
@@ -266,13 +269,18 @@ function sembrarDatosPayrollInicial() {
     const adelantos = loadAdelantos();
     let cambioAdelantos = false;
     (semilla.adelantos || []).forEach((a) => {
-      const yaExiste = adelantos.some(
-        (ex) =>
-          ex.empleado === a.empleado &&
-          ex.fecha === a.fecha &&
-          Math.abs(ex.monto - a.monto) < 0.01 &&
-          ex.medioPago === a.medioPago
-      );
+      // Si el registro trae un "_seedId" (para casos con más de un adelanto idéntico el mismo
+      // día, como dos transferencias de $50.000 en la misma fecha), lo usamos para distinguirlos
+      // entre sí. Si no lo trae, seguimos con el chequeo de siempre (fecha+monto+medio).
+      const yaExiste = a._seedId
+        ? adelantos.some((ex) => ex.origenSeedId === a._seedId)
+        : adelantos.some(
+            (ex) =>
+              ex.empleado === a.empleado &&
+              ex.fecha === a.fecha &&
+              Math.abs(ex.monto - a.monto) < 0.01 &&
+              ex.medioPago === a.medioPago
+          );
       if (!yaExiste) {
         adelantos.push({
           id: "seed-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
@@ -281,6 +289,7 @@ function sembrarDatosPayrollInicial() {
           monto: a.monto,
           medioPago: a.medioPago,
           nota: a._nota || "Cargado desde seed-payroll.json — revisar",
+          origenSeedId: a._seedId || null,
           saldado: false,
           creadoEn: new Date().toISOString(),
         });
@@ -4340,6 +4349,7 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '<div class="form-sueldo" style="max-width:420px">',
     '<div><label>Empleado</label><select id="rEmpleado"><option value="">Elegí un empleado...</option></select></div>',
     '<button id="btnGenerarResumen">Ver estado de cuenta</button>',
+    '<button id="btnDescargarPdf" class="secundario">📄 Descargar PDF (para imprimir)</button>',
     '</div>',
     '<div id="cuentaCorrienteBox" style="display:none;margin-top:14px"></div>',
     '<textarea id="rResultado" rows="14" style="display:none;font-family:monospace;font-size:12.5px;margin-top:10px" readonly></textarea>',
@@ -4499,7 +4509,7 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '  var sueldosEmp = SUELDOS.filter(function(s){ return s.empleado === empleado; });',
     '  var adelantosEmp = ADELANTOS.filter(function(a){ return a.empleado === empleado; });',
     '  var movimientos = [];',
-    '  sueldosEmp.forEach(function(s){ movimientos.push({ fecha: s.mes + "-01", concepto: "Sueldo " + nombreMes(s.mes), monto: s.total }); });',
+    '  sueldosEmp.forEach(function(s){ movimientos.push({ fecha: s.fecha || (s.mes + "-01"), concepto: s.concepto || ("Sueldo " + nombreMes(s.mes)), monto: s.total }); });',
     '  adelantosEmp.forEach(function(a){',
     '    var medio = a.medioPago === "efectivo" ? "Efectivo" : "Mercadopago";',
     '    var concepto = "Adelanto (" + medio + ")" + (a.nota ? " — " + a.nota : "");',
@@ -4612,6 +4622,29 @@ Valentina Marieth Gonzalez|normal||||</textarea>`,
     '      area.style.display = "block";',
     '      document.getElementById("btnCopiarResumen").style.display = "inline-block";',
     '      msg.textContent = "";',
+    '    })',
+    '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
+    '});',
+    'document.getElementById("btnDescargarPdf").addEventListener("click", function(){',
+    '  var empleado = document.getElementById("rEmpleado").value;',
+    '  var msg = document.getElementById("msgResumen");',
+    '  if (!empleado) { msg.textContent = "Elegí un empleado."; return; }',
+    '  msg.textContent = "Generando PDF...";',
+    '  fetch("/admin/cuenta-corriente-pdf", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({empleado: empleado})})',
+    '    .then(function(r){',
+    '      if (!r.ok) { return r.json().then(function(d){ throw new Error(d.error || "No se pudo generar"); }); }',
+    '      return r.blob();',
+    '    })',
+    '    .then(function(blob){',
+    '      var url = window.URL.createObjectURL(blob);',
+    '      var a = document.createElement("a");',
+    '      a.href = url;',
+    '      a.download = "estado-cuenta-" + empleado.replace(/[^a-zA-Z0-9]+/g, "-") + ".pdf";',
+    '      document.body.appendChild(a);',
+    '      a.click();',
+    '      a.remove();',
+    '      window.URL.revokeObjectURL(url);',
+    '      msg.textContent = "✅ Descargado.";',
     '    })',
     '    .catch(function(e){ msg.textContent = "Error: " + e.message; });',
     '});',
@@ -4757,7 +4790,7 @@ function construirCuentaCorrienteEmpleado(empleado, sueldos, adelantos) {
   sueldos
     .filter((s) => s.empleado === empleado)
     .forEach((s) => {
-      movimientos.push({ fecha: `${s.mes}-01`, concepto: `Sueldo ${nombreMes(s.mes)}`, monto: s.total });
+      movimientos.push({ fecha: s.fecha || `${s.mes}-01`, concepto: s.concepto || `Sueldo ${nombreMes(s.mes)}`, monto: s.total });
     });
   adelantos
     .filter((a) => a.empleado === empleado)
@@ -4774,6 +4807,113 @@ function construirCuentaCorrienteEmpleado(empleado, sueldos, adelantos) {
     return { ...m, saldo };
   });
 }
+
+// Genera el PDF del extracto de cuenta corriente de un empleado — pensado para imprimir y
+// cotejar en persona (tiene renglón de firma al final). Maneja salto de página solo si hay
+// muchos movimientos.
+async function generarPdfCuentaCorriente(empleadoInfo, cuenta) {
+  const fmt = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const acortar = (texto, max) => (texto.length > max ? texto.slice(0, max - 1) + "…" : texto);
+
+  const pdfDoc = await PDFDocument.create();
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+  const ANCHO = 595.28,
+    ALTO = 841.89; // A4 en puntos
+  const MARGEN = 40;
+  const COL_FECHA = MARGEN;
+  const COL_CONCEPTO = MARGEN + 65;
+  const COL_MONTO = ANCHO - MARGEN - 170;
+  const COL_SALDO = ANCHO - MARGEN - 85;
+
+  let page = pdfDoc.addPage([ANCHO, ALTO]);
+  let y = ALTO - MARGEN;
+
+  const dibujarEncabezado = (esPrimeraPagina) => {
+    if (esPrimeraPagina) {
+      page.drawText("CHAPARRITA — Estado de cuenta", { x: MARGEN, y, size: 16, font: fontBold, color: rgb(0.1, 0.1, 0.1) });
+      y -= 24;
+      page.drawText(empleadoInfo.nombre, { x: MARGEN, y, size: 13, font: fontBold });
+      y -= 16;
+      const datos = [
+        empleadoInfo.cuit ? `CUIT: ${empleadoInfo.cuit}` : null,
+        empleadoInfo.dni ? `DNI: ${empleadoInfo.dni}` : null,
+      ]
+        .filter(Boolean)
+        .join("   ·   ");
+      if (datos) {
+        page.drawText(datos, { x: MARGEN, y, size: 10, font, color: rgb(0.35, 0.35, 0.35) });
+        y -= 14;
+      }
+      const hoy = new Date().toLocaleDateString("es-AR");
+      page.drawText(`Generado el ${hoy}`, { x: MARGEN, y, size: 9, font, color: rgb(0.5, 0.5, 0.5) });
+      y -= 22;
+    } else {
+      y -= 10;
+    }
+    // Encabezado de la tabla
+    page.drawRectangle({ x: MARGEN, y: y - 4, width: ANCHO - MARGEN * 2, height: 18, color: rgb(0.93, 0.91, 0.87) });
+    page.drawText("Fecha", { x: COL_FECHA + 3, y, size: 9, font: fontBold });
+    page.drawText("Concepto", { x: COL_CONCEPTO + 3, y, size: 9, font: fontBold });
+    page.drawText("Monto", { x: COL_MONTO, y, size: 9, font: fontBold });
+    page.drawText("Saldo", { x: COL_SALDO, y, size: 9, font: fontBold });
+    y -= 20;
+  };
+
+  dibujarEncabezado(true);
+
+  cuenta.forEach((m) => {
+    if (y < MARGEN + 60) {
+      page = pdfDoc.addPage([ANCHO, ALTO]);
+      y = ALTO - MARGEN;
+      dibujarEncabezado(false);
+    }
+    const [yyyy, mm, dd] = m.fecha.split("-");
+    const fechaTexto = `${dd}/${mm}/${yyyy}`;
+    const signo = m.monto >= 0 ? "+" : "-";
+    const color = m.monto >= 0 ? rgb(0.11, 0.45, 0.2) : rgb(0.6, 0.15, 0.1);
+    page.drawText(fechaTexto, { x: COL_FECHA, y, size: 9, font });
+    page.drawText(acortar(m.concepto, 42), { x: COL_CONCEPTO, y, size: 9, font });
+    page.drawText(`${signo}$${fmt(Math.abs(m.monto))}`, { x: COL_MONTO, y, size: 9, font, color });
+    page.drawText(`$${fmt(m.saldo)}`, { x: COL_SALDO, y, size: 9, font: fontBold });
+    y -= 15;
+  });
+
+  if (y < MARGEN + 90) {
+    page = pdfDoc.addPage([ANCHO, ALTO]);
+    y = ALTO - MARGEN;
+  }
+  y -= 15;
+  page.drawLine({ start: { x: MARGEN, y: y + 8 }, end: { x: ANCHO - MARGEN, y: y + 8 }, thickness: 1, color: rgb(0.7, 0.7, 0.7) });
+  const saldoFinal = cuenta.length > 0 ? cuenta[cuenta.length - 1].saldo : 0;
+  const textoSaldo =
+    saldoFinal >= 0 ? `SALDO A FAVOR DEL EMPLEADO: $${fmt(saldoFinal)}` : `SALDO A FAVOR DE CHAPARRITA: $${fmt(Math.abs(saldoFinal))}`;
+  page.drawText(textoSaldo, { x: MARGEN, y: y - 10, size: 12, font: fontBold });
+  y -= 55;
+  page.drawLine({ start: { x: MARGEN, y }, end: { x: MARGEN + 220, y }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
+  page.drawText("Firma del empleado", { x: MARGEN, y: y - 12, size: 9, font, color: rgb(0.4, 0.4, 0.4) });
+  page.drawLine({ start: { x: ANCHO - MARGEN - 220, y }, end: { x: ANCHO - MARGEN, y }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
+  page.drawText("Fecha", { x: ANCHO - MARGEN - 220, y: y - 12, size: 9, font, color: rgb(0.4, 0.4, 0.4) });
+
+  return await pdfDoc.save();
+}
+
+app.post("/admin/cuenta-corriente-pdf", requireAdminApi, requireSueldosApi, async (req, res) => {
+  try {
+    const { empleado } = req.body;
+    if (!empleado) return res.status(400).json({ error: "Falta el empleado" });
+    const empleadoInfo = loadEmpleados().find((e) => e.nombre === empleado) || { nombre: empleado };
+    const cuenta = construirCuentaCorrienteEmpleado(empleado, loadSueldos(), loadAdelantos());
+    const pdfBytes = await generarPdfCuentaCorriente(empleadoInfo, cuenta);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="estado-cuenta-${empleado.replace(/[^a-zA-Z0-9]+/g, "-")}.pdf"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (err) {
+    console.error("Error generando PDF de cuenta corriente:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.post("/admin/resumen-empleado", requireAdminApi, requireSueldosApi, (req, res) => {
   try {
