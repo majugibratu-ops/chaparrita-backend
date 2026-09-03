@@ -6098,18 +6098,37 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
     '  <label class="toggle-switch"><input type="checkbox" id="chkToggle" /><span class="toggle-slider"></span></label>',
     '</div>',
     '<div id="msg">Cargando...</div>',
+
+    '<h1 style="margin-top:32px">📦 Pedidos automáticos a FUDO</h1>',
+    '<p class="sub">Apagar esto NO afecta el menú en vivo ni el stock — solo el paso de crear el pedido automáticamente en FUDO cuando un cliente confirma un pedido. Apagalo para pruebas, sin cargar pedidos de mentira al sistema real.</p>',
+    '<div class="card estado-card" id="estadoFudo" style="display:none">',
+    '  <div class="estado-info"><b id="estadoFudoTexto">...</b><span>Tocá el switch para cambiar</span></div>',
+    '  <label class="toggle-switch"><input type="checkbox" id="chkToggleFudo" /><span class="toggle-slider"></span></label>',
+    '</div>',
+    '<div id="msgFudo"></div>',
+
     '<script>',
     'var activo = null;',
+    'var fudoActivo = null;',
     'function pintar() {',
     '  var texto = document.getElementById("estadoTexto");',
     '  var chk = document.getElementById("chkToggle");',
     '  chk.checked = !!activo;',
     '  texto.textContent = activo ? "🟢 Asistente ENCENDIDO" : "🔴 Asistente APAGADO";',
     '}',
+    'function pintarFudo() {',
+    '  var texto = document.getElementById("estadoFudoTexto");',
+    '  var chk = document.getElementById("chkToggleFudo");',
+    '  chk.checked = !!fudoActivo;',
+    '  texto.textContent = fudoActivo ? "🟢 Carga automática ENCENDIDA" : "🔴 Carga automática PAUSADA (modo prueba)";',
+    '}',
     'function cargar() {',
     '  fetch("/admin/switch-data", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({})})',
     '    .then(function(r){ if (r.status === 401) { window.location.href = "/admin/login"; throw new Error("Sesión vencida"); } return r.json(); })',
-    '    .then(function(data){ activo = data.activo; pintar(); document.getElementById("estado").style.display = "flex"; document.getElementById("msg").textContent = ""; })',
+    '    .then(function(data){',
+    '      activo = data.activo; pintar(); document.getElementById("estado").style.display = "flex"; document.getElementById("msg").textContent = "";',
+    '      fudoActivo = !data.pausarPedidosAutomaticosFudo; pintarFudo(); document.getElementById("estadoFudo").style.display = "flex";',
+    '    })',
     '    .catch(function(e){ if (e.message !== "Sesión vencida") { document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; } });',
     '}',
     'cargar();',
@@ -6120,6 +6139,13 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
     '    .then(function(){ activo = nuevoValor; pintar(); document.getElementById("msg").textContent = "Listo, se guardó."; document.getElementById("msg").className = "msg-ok"; })',
     '    .catch(function(e){ document.getElementById("msg").textContent = "Error: " + e.message; document.getElementById("msg").className = "msg-error"; });',
     '});',
+    'document.getElementById("chkToggleFudo").addEventListener("change", function() {',
+    '  var nuevoValor = this.checked;',
+    '  fetch("/admin/switch-fudo-save", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({activo: nuevoValor})})',
+    '    .then(function(r){ if (!r.ok) { throw new Error("No se pudo guardar"); } return r.json(); })',
+    '    .then(function(){ fudoActivo = nuevoValor; pintarFudo(); document.getElementById("msgFudo").textContent = "Listo, se guardó."; document.getElementById("msgFudo").className = "msg-ok"; })',
+    '    .catch(function(e){ document.getElementById("msgFudo").textContent = "Error: " + e.message; document.getElementById("msgFudo").className = "msg-error"; });',
+    '});',
     '</' + 'script>',
     '</div>',
     '</body></html>'
@@ -6129,7 +6155,7 @@ app.get("/admin/switch", requireAdminPage, (_req, res) => {
 
 app.post("/admin/switch-data", requireAdminApi, (req, res) => {
   const config = loadConfig();
-  res.json({ activo: config.asistenteActivo !== false });
+  res.json({ activo: config.asistenteActivo !== false, pausarPedidosAutomaticosFudo: config.pausarPedidosAutomaticosFudo === true });
 });
 
 app.post("/admin/switch-save", requireAdminApi, (req, res) => {
@@ -6138,6 +6164,14 @@ app.post("/admin/switch-save", requireAdminApi, (req, res) => {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
   console.log(`Asistente ${config.asistenteActivo ? "ENCENDIDO" : "APAGADO"} desde /admin/switch.`);
   res.json({ ok: true, activo: config.asistenteActivo });
+});
+
+app.post("/admin/switch-fudo-save", requireAdminApi, (req, res) => {
+  const config = loadConfig();
+  config.pausarPedidosAutomaticosFudo = !req.body.activo; // el switch muestra "encendido = carga", guardamos el booleano invertido (pausado)
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  console.log(`Carga automática de pedidos a FUDO ${config.pausarPedidosAutomaticosFudo ? "PAUSADA" : "ENCENDIDA"} desde /admin/switch.`);
+  res.json({ ok: true, pausarPedidosAutomaticosFudo: config.pausarPedidosAutomaticosFudo });
 });
 
 // ==================== Editor de configuración (precios, promos, teléfonos, horarios) ====================
@@ -7603,6 +7637,10 @@ async function matchearItemsConFudo(itemsTexto, productosFudo) {
 // motivo} si no — en ese caso seguimos con el flujo manual de siempre, como respaldo,
 // nunca se pierde el pedido por un problema de la integración.
 async function crearPedidoEnFudo({ itemsTexto, nombreCliente, telefonoCliente, tipo, direccion, costoEnvio, medioPagoId, totalAprox }) {
+  if (loadConfig().pausarPedidosAutomaticosFudo === true) {
+    console.log("Carga automática de pedidos a FUDO pausada desde /admin/config (modo prueba) — se omite, se sigue con el flujo manual.");
+    return { ok: false, motivo: "pausado_modo_prueba" };
+  }
   const productosFudo = await getFudoProductos();
   if (productosFudo.length === 0) {
     console.log("No se pudo obtener el catálogo de FUDO — se omite la creación automática del pedido.");
