@@ -142,6 +142,30 @@ function saveFudoOrdenes(datos) {
   fs.writeFileSync(FUDO_ORDENES_PATH, JSON.stringify(datos, null, 2), "utf8");
 }
 
+// Red de seguridad para el punto siguiente: si por algún motivo el webhook de FUDO que
+// avisa "pedido cerrado/rechazado" nunca llega, un pedido no puede quedar "activo" para
+// siempre — pasadas 6 horas lo damos por cerrado igual, aunque no hayamos recibido el aviso.
+const VENTANA_SEGURIDAD_PEDIDO_ACTIVO_MS = 6 * 60 * 60 * 1000; // 6 horas
+
+// ¿Este cliente ya tiene, AHORA MISMO, un pedido con estos mismos ítems todavía "en
+// curso" en FUDO (confirmado pero sin cerrar ni rechazar)? Se usa para no crear un pedido
+// duplicado si Claude vuelve a emitir [[PEDIDO_CONFIRMADO]] para el mismo pedido más tarde
+// en la charla (por ejemplo si el cliente responde algo después de que ya se cargó) — sin
+// depender de una ventana de tiempo fija: mientras FUDO diga que el pedido sigue activo,
+// se sigue considerando el mismo, más allá de cuántos minutos u horas hayan pasado.
+function hayPedidoActivoDuplicado(telefono, itemsNormalizados) {
+  const ordenesFudo = loadFudoOrdenes();
+  const ahora = Date.now();
+  return Object.values(ordenesFudo).some((orden) => {
+    if (orden.telefono !== telefono && soloDigitos(orden.telefono) !== telefono) return false;
+    if (orden.estado !== "en_curso") return false;
+    if (orden.itemsNormalizados !== itemsNormalizados) return false;
+    const creadoEnMs = new Date(orden.creadoEn).getTime();
+    if (!creadoEnMs || ahora - creadoEnMs > VENTANA_SEGURIDAD_PEDIDO_ACTIVO_MS) return false; // venció la red de seguridad, ya no cuenta
+    return true;
+  });
+}
+
 // ---- Facturas de proveedores leídas (foto -> datos extraídos). Por ahora se guardan acá
 // mientras no tenemos la API de stock/gastos de FUDO — el día que la consigamos, el paso
 // final (cargarFacturaEnFudo) se reemplaza por el llamado real, sin tocar el resto del flujo. ----
@@ -2457,13 +2481,22 @@ app.post("/webhook", async (req, res) => {
       const itemsNormalizados = normalizarItemsParaComparar(itemsDeEstePedido);
       const registroAnterior = ultimoPedidoConfirmadoPorCliente.get(soloDigitos(from));
       const msDesdeUltimoPedido = registroAnterior ? Date.now() - registroAnterior.procesadoEn : Infinity;
-      const esPedidoDuplicado =
+      const esRepeticionRapida =
         registroAnterior &&
         registroAnterior.itemsNormalizados === itemsNormalizados &&
         msDesdeUltimoPedido < VENTANA_DEDUP_PEDIDO_MS;
 
+      // Además de la repetición rápida (arriba), chequeamos contra el estado REAL del
+      // pedido en FUDO: si este cliente ya tiene un pedido con estos mismos ítems que
+      // FUDO todavía no marcó como cerrado/rechazado, es el mismo pedido — sin importar
+      // cuánto tiempo pasó (por ejemplo, si el cliente responde recién 40 minutos después,
+      // mientras el pedido sigue en preparación).
+      const esPedidoAunActivoEnFudo = hayPedidoActivoDuplicado(soloDigitos(from), itemsNormalizados);
+      const esPedidoDuplicado = esRepeticionRapida || esPedidoAunActivoEnFudo;
+
       if (esPedidoDuplicado) {
-        console.log(`Pedido duplicado detectado para ${from} (hace ${Math.round(msDesdeUltimoPedido / 1000)}s) — se ignora, no se vuelve a cargar.`);
+        const motivo = esRepeticionRapida ? `repetido hace ${Math.round(msDesdeUltimoPedido / 1000)}s` : "ya está activo en FUDO";
+        console.log(`Pedido duplicado detectado para ${from} (${motivo}) — se ignora, no se vuelve a cargar.`);
       } else {
         ultimoPedidoConfirmadoPorCliente.set(soloDigitos(from), { itemsNormalizados, procesadoEn: Date.now() });
 
@@ -2543,6 +2576,8 @@ app.post("/webhook", async (req, res) => {
           telefono: from,
           nombre: (perfilCliente && perfilCliente.nombre) || "",
           creadoEn: new Date().toISOString(),
+          estado: "en_curso", // pasa a "cerrado" cuando llega el webhook de FUDO con ORDER-CLOSED u ORDER-REJECTED
+          itemsNormalizados,
         };
         saveFudoOrdenes(ordenesFudo);
       }
@@ -8152,6 +8187,8 @@ app.post("/webhook/fudo", async (req, res) => {
       "ORDER-CLOSED": "¡Tu pedido fue entregado, que lo disfrutes! 🌮🎉",
     };
 
+    const ESTADOS_QUE_CIERRAN_EL_PEDIDO = ["ORDER-CLOSED", "ORDER-REJECTED"];
+
     if (fudoOrderId) {
       const ordenesFudo = loadFudoOrdenes();
       const orden = ordenesFudo[fudoOrderId];
@@ -8163,6 +8200,13 @@ app.post("/webhook/fudo", async (req, res) => {
           console.log(`Aviso de estado del pedido FUDO #${fudoOrderId} (${tipoEvento}) enviado a ${orden.telefono}.`);
         } else {
           console.log(`Evento de FUDO no reconocido ("${tipoEvento}") para el pedido #${fudoOrderId} — revisar el nombre exacto del campo de evento en el log de arriba.`);
+        }
+        // Marcamos el pedido como cerrado cuando corresponde, así deja de contar como
+        // "en curso" para el chequeo anti-duplicados — un pedido nuevo con los mismos
+        // ítems para este cliente se vuelve a aceptar a partir de acá.
+        if (ESTADOS_QUE_CIERRAN_EL_PEDIDO.includes(tipoEvento) && orden.estado !== "cerrado") {
+          orden.estado = "cerrado";
+          saveFudoOrdenes(ordenesFudo);
         }
       } else {
         console.log(`Webhook de FUDO para el pedido #${fudoOrderId} (evento: ${tipoEvento}), pero no tenemos guardado el teléfono de ese cliente.`);
