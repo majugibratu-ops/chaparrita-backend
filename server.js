@@ -1265,6 +1265,20 @@ const ADMIN_CONFIG_PAGE = [
   '  var mesasPatio = numInput(mesasCfg.patio);',
   '  var mesasVereda = numInput(mesasCfg.vereda);',
   '  area.appendChild(el("div", {class:"row"}, [field("Mesas adentro", mesasAdentro), field("Mesas patio", mesasPatio), field("Mesas vereda", mesasVereda)]));',
+  '  var btnSyncMesas = el("button", {type:"button", text:"\ud83d\udd04 Sincronizar cantidad real desde FUDO", class:"secundario"});',
+  '  var msgSyncMesas = el("span", {style:"font-size:12px;margin-left:10px;color:var(--texto-tenue);"});',
+  '  btnSyncMesas.addEventListener("click", function() {',
+  '    btnSyncMesas.disabled = true; msgSyncMesas.textContent = "Consultando FUDO...";',
+  '    fetch("/admin/mesas-sincronizar-fudo", {method:"POST"}).then(function(r){ return r.json(); }).then(function(data){',
+  '      btnSyncMesas.disabled = false;',
+  '      if (data.error) { msgSyncMesas.textContent = "\u274c " + data.error; return; }',
+  '      mesasAdentro.value = data.mesasPorSector.adentro;',
+  '      mesasPatio.value = data.mesasPorSector.patio;',
+  '      mesasVereda.value = data.mesasPorSector.vereda;',
+  '      msgSyncMesas.textContent = "\u2705 Actualizado (record\u00e1 guardar los cambios abajo). Murallita queda afuera del c\u00e1lculo a prop\u00f3sito.";',
+  '    }).catch(function(){ btnSyncMesas.disabled = false; msgSyncMesas.textContent = "\u274c Error de red"; });',
+  '  });',
+  '  area.appendChild(el("div", {}, [btnSyncMesas, msgSyncMesas]));',
   '  var duracionMesaInput = numInput(cfg.duracionMesaMinutos || 90);',
   '  area.appendChild(field("Duraci\u00f3n promedio de una mesa ocupada (minutos)", duracionMesaInput));',
   '',
@@ -5801,6 +5815,62 @@ app.get("/admin/fudo-diagnostico-mesas", requireAdminPage, async (req, res) => {
     </body>
     </html>
   `);
+});
+
+// ==================== Sincronizar mesas reales desde FUDO ====================
+// Mapeo fijo entre los salones reales de FUDO y los sectores que maneja Chaparrita para
+// reservas. "Murallita" queda deliberadamente AFUERA: son mesas que el local solo abre a
+// criterio del encargado cuando hay mucha demanda, no algo que el bot deba ofrecer u
+// contar solo — se maneja a mano, fuera de este cálculo.
+const MAPEO_SALONES_FUDO = [
+  { nombreFudo: "vereda", sector: "vereda" },
+  { nombreFudo: "patio interno", sector: "patio" },
+  { nombreFudo: "salon y barra", sector: "adentro" },
+];
+
+function normalizarNombreSalon(s) {
+  return (s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // saca acentos
+    .toLowerCase().trim();
+}
+
+// Llama a /rooms y /tables de FUDO y devuelve {adentro, patio, vereda} con la cantidad
+// real de mesas de cada uno (Murallita excluido a propósito). Si algo falla, devuelve null
+// — nunca pisa la config existente con datos a medias.
+async function contarMesasRealesPorSector() {
+  const [rooms, tables] = await Promise.all([
+    fudoApiFetch("/rooms?page[size]=100"),
+    fudoApiFetch("/tables?page[size]=100"),
+  ]);
+  if (!rooms || !Array.isArray(rooms.data) || !tables || !Array.isArray(tables.data)) return null;
+
+  const sectorPorRoomId = {};
+  rooms.data.forEach((room) => {
+    const nombreNormalizado = normalizarNombreSalon(room.attributes && room.attributes.name);
+    const mapeo = MAPEO_SALONES_FUDO.find((m) => m.nombreFudo === nombreNormalizado);
+    if (mapeo) sectorPorRoomId[room.id] = mapeo.sector;
+    // Salones sin mapeo (ej: Murallita) quedan afuera a propósito — no se cuentan.
+  });
+
+  const conteo = { adentro: 0, patio: 0, vereda: 0 };
+  tables.data.forEach((mesa) => {
+    const roomId = mesa.relationships && mesa.relationships.room && mesa.relationships.room.data && mesa.relationships.room.data.id;
+    const sector = sectorPorRoomId[roomId];
+    if (sector) conteo[sector] += 1;
+  });
+  return conteo;
+}
+
+app.post("/admin/mesas-sincronizar-fudo", requireAdminApi, async (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.status(403).json({ error: "Sin permiso" });
+  const conteo = await contarMesasRealesPorSector();
+  if (!conteo) return res.status(502).json({ error: "No se pudo consultar /rooms o /tables en FUDO — revisar credenciales o logs del servidor." });
+  const config = loadConfig();
+  config.mesasPorSector = conteo;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  console.log(`Mesas sincronizadas desde FUDO: adentro=${conteo.adentro}, patio=${conteo.patio}, vereda=${conteo.vereda} (Murallita excluida).`);
+  res.json({ ok: true, mesasPorSector: conteo });
 });
 
 // ==================== Panel de Stock e Ingredientes (datos reales de FUDO) ====================
