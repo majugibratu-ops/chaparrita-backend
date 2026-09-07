@@ -5726,6 +5726,42 @@ app.post("/admin/facturas-actualizar-stock", requireAdminApi, async (req, res) =
   }
 });
 
+// ==================== Diagnóstico: mesas y salones reales en FUDO ====================
+// Endpoint temporal, solo para el dueño, para ver qué campos devuelve de verdad la API de
+// FUDO para /rooms y /tables — antes de decidir cómo usar esos datos para la disponibilidad
+// de reservas (hoy esa lógica vive aparte, calculada con la config propia de Chaparrita).
+app.get("/admin/fudo-diagnostico-mesas", requireAdminPage, async (req, res) => {
+  const sesion = obtenerDatosSesionAdmin(req);
+  if (sesion && sesion.rol !== "dueño") return res.redirect("/admin?sinPermiso=1");
+  const [rooms, tables] = await Promise.all([
+    fudoApiFetch("/rooms?page[size]=100"),
+    fudoApiFetch("/tables?page[size]=100"),
+  ]);
+  res.type("html").send(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Chaparrita — Diagnóstico mesas FUDO</title>
+      <style>${ADMIN_BASE_CSS}
+        pre { background: var(--bg-elevado); border: 1px solid var(--borde); border-radius: 12px; padding: 16px; overflow-x: auto; font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+      </style>
+    </head>
+    <body>
+      <div class="contenedor-ancho">
+        <div class="topbar">
+          <div class="marca"><div class="icono">🔎</div><div><b>Diagnóstico FUDO — mesas y salones</b><span>Respuesta cruda de la API, para decidir cómo usarla</span></div></div>
+          <a class="logout" href="/admin">← Volver</a>
+        </div>
+        <p class="sub">Esto llama en vivo a <code>GET /rooms</code> y <code>GET /tables</code> de la API de FUDO con las credenciales ya cargadas en Railway. Si alguno sale <code>null</code>, revisar FUDO_API_KEY/FUDO_API_SECRET o los logs del servidor.</p>
+        <h3>/rooms (salones)</h3>
+        <pre>${rooms ? JSON.stringify(rooms, null, 2).replace(/</g, "&lt;") : "null — ver logs del servidor para el error"}</pre>
+        <h3>/tables (mesas)</h3>
+        <pre>${tables ? JSON.stringify(tables, null, 2).replace(/</g, "&lt;") : "null — ver logs del servidor para el error"}</pre>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
 // ==================== Panel de Stock e Ingredientes (datos reales de FUDO) ====================
 
 app.get("/admin/fudo-stock", requireAdminPage, (_req, res) => {
