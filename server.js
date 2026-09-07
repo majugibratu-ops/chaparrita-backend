@@ -505,6 +505,24 @@ function calcularDisponibilidad(config, reservas, sector, fechaISO, horaHHMM) {
   return { totalMesas, ocupadas, libres, sinConfigurar: false };
 }
 
+// ---- Grupos grandes: solo informativo para el equipo (no bloquea nada solo) ----
+// Turno simple: mediodía (antes de las 17:00) o noche (17:00 en adelante).
+function turnoDeHora(horaHHMM) {
+  const minutos = minutosDesdeHHMM(horaHHMM);
+  return minutos < 17 * 60 ? "Mediodía" : "Noche";
+}
+
+// Cuenta cuántas reservas de "grupo grande" (personas >= umbral) ya hay para esa fecha y
+// turno — se usa solo para avisarle al equipo un número de referencia, nunca para bloquear
+// ni rechazar nada automáticamente.
+function contarGruposGrandesEnTurno(reservas, fechaISO, turno, umbralPersonas) {
+  return reservas.filter((r) => {
+    if (r.fecha !== fechaISO) return false;
+    if (Number(r.personas) < umbralPersonas) return false;
+    return turnoDeHora(r.hora) === turno;
+  }).length;
+}
+
 function extractDisponibilidadMarker(text) {
   const regex = /\[\[CONSULTAR_DISPONIBILIDAD:\s*(\{[\s\S]*?\})\]\]/;
   const match = text.match(regex);
@@ -1250,6 +1268,13 @@ const ADMIN_CONFIG_PAGE = [
   '  var duracionMesaInput = numInput(cfg.duracionMesaMinutos || 90);',
   '  area.appendChild(field("Duraci\u00f3n promedio de una mesa ocupada (minutos)", duracionMesaInput));',
   '',
+  '  area.appendChild(el("h2", {text:"Grupos grandes", id:"sec-grupos-grandes"}));',
+  '  area.appendChild(el("p", {text:"A partir de esta cantidad de personas, el agente no confirma la reserva solo: le avisa al cliente que el local lo va a contactar para coordinar, y le muestra al equipo cu\u00e1ntos grupos grandes ya hay anotados para ese turno (informativo, no bloquea nada autom\u00e1ticamente).", style:"font-size:12px;color:var(--texto-tenue);margin:2px 0 8px 0;"}));',
+  '  var gruposCfg = cfg.gruposGrandes || {umbralPersonas:6, cupoPorTurno:2};',
+  '  var umbralGrupoInput = numInput(gruposCfg.umbralPersonas);',
+  '  var cupoTurnoInput = numInput(gruposCfg.cupoPorTurno);',
+  '  area.appendChild(el("div", {class:"row"}, [field("A partir de cu\u00e1ntas personas", umbralGrupoInput), field("Cupo sugerido por turno", cupoTurnoInput)]));',
+  '',
   '  area.appendChild(el("h2", {text:"Productos agotados hoy", id:"sec-agotados"}));',
   '  var agotadosBox = el("div", {id:"agotadosBox"});',
   '  var agotadosList = cfg.agotados.slice();',
@@ -1493,6 +1518,7 @@ const ADMIN_CONFIG_PAGE = [
   '    nuevo.amenities = {adentro: amAdentro.value, patio: amPatio.value, vereda: amVereda.value};',
   '    nuevo.mesasPorSector = {adentro: Number(mesasAdentro.value), patio: Number(mesasPatio.value), vereda: Number(mesasVereda.value)};',
   '    nuevo.duracionMesaMinutos = Number(duracionMesaInput.value);',
+  '    nuevo.gruposGrandes = {umbralPersonas: Number(umbralGrupoInput.value), cupoPorTurno: Number(cupoTurnoInput.value)};',
   '    nuevo.agotados = agotadosList;',
   '    nuevo["cumplea\u00f1os"].minPersonas = Number(minPersonasInput.value);',
   '    nuevo["cumplea\u00f1os"].paquetes = paquetesList;',
@@ -2418,8 +2444,23 @@ app.post("/webhook", async (req, res) => {
       ]);
     }
 
+    // Si es un grupo grande (umbral configurable en /admin/config), le agregamos al aviso
+    // del equipo una línea de referencia con cuántos grupos grandes ya hay anotados para
+    // ese mismo turno — es solo informativo, para que quien lo reciba sepa que esta reserva
+    // necesita coordinación (juntar mesas, ver el sector) y tenga un número de contexto a
+    // mano. Nunca bloquea ni rechaza nada por sí solo.
+    const umbralGrupoGrande = (config.gruposGrandes && config.gruposGrandes.umbralPersonas) || 6;
+    const esGrupoGrande = datosReserva && Number(datosReserva.personas) >= umbralGrupoGrande;
+    let reservaConfirmadaConAviso = reservaConfirmada;
+    if (reservaConfirmada && esGrupoGrande) {
+      const turno = turnoDeHora(datosReserva.hora);
+      const cupoConfigurado = (config.gruposGrandes && config.gruposGrandes.cupoPorTurno) || 2;
+      const cantidadEnTurno = contarGruposGrandesEnTurno(loadReservas(), datosReserva.fecha, turno, umbralGrupoGrande);
+      reservaConfirmadaConAviso = `⚠️ *GRUPO GRANDE* (${datosReserva.personas} personas) — turno ${turno}. Van ${cantidadEnTurno} grupo(s) grande(s) anotados para ese turno (cupo de referencia: ${cupoConfigurado}). Coordinar mesa/sector con el cliente.\n\n${reservaConfirmada}`;
+    }
+
     if (reservaConfirmada && config.grupoReservasWhatsappId) {
-      await sendWhatsappText(config.grupoReservasWhatsappId, reservaConfirmada);
+      await sendWhatsappText(config.grupoReservasWhatsappId, reservaConfirmadaConAviso);
     }
 
     // Aviso individual al staff (alternativa que sí funciona con Cloud API, que no
@@ -2455,7 +2496,7 @@ app.post("/webhook", async (req, res) => {
         const idComandaReserva = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
         for (const aviso of avisosActivos) {
           const telAviso = soloDigitos(aviso.telefono);
-          await sendWhatsappText(telAviso, reservaConfirmada);
+          await sendWhatsappText(telAviso, reservaConfirmadaConAviso);
           await sendWhatsappButtons(telAviso, "¿Me confirmás que ya quedó agendada?", [
             { id: "reserva_confirmada", titulo: "Sí, confirmado ✅" },
           ]);
